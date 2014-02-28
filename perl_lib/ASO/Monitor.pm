@@ -31,13 +31,14 @@ sub new {
 	  LOGFILE		 => undef,
 
 	  JOBMANAGER		 => undef,
+	  JOB_PARALLELISM	 =>  4,       # Max number of monitoring jobs to run in parallel
 
-          Q_INTERFACE            => undef,    # A transfer queue interface object
-          Q_TIMEOUT              => 60,       # Timeout for Q_INTERFACE commands
-          INBOX_POLL_INTERVA     => 10,       # Inbox polling interval
+          Q_INTERFACE		 => undef,    # A transfer queue interface object
+          Q_TIMEOUT		 => 60,       # Timeout for Q_INTERFACE commands
+          INBOX_POLL_INTERVAL	 => 10,       # Inbox polling interval
           JOB_POLL_INTERVAL_SLOW => 10,       # Job polling interval
           JOB_POLL_INTERVAL_FAST =>  1,       # Job polling interval
-          POLL_QUEUE             =>  0,       # Poll the queue or not?
+          POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
           JOB_POSTBACK           => undef,    # Callback for job state changes
@@ -46,7 +47,8 @@ sub new {
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
           JOBS			 => {},       # A hash of Job-IDs.
           LAST_SUCCESSFULL_POLL  => time,     # When I last got a job status
-          REPORT_QUEUE_INTERVAL  => 60,       # How often do I report the job-queue length
+          QUEUE_STATS_INTERVAL   => 60,       # How often do I report the job-queue length
+          REPORTER_INTERVAL	 => 15,       # How often to notify the Reporter of progress
         );
 
   $self = \%params;
@@ -88,12 +90,13 @@ sub new {
         forget_job		=> 'forget_job',
         _child			=> '_child',
         report_queue		=> 'report_queue',
+        notify_reporter		=> 'notify_reporter',
       },
     ],
   );
 
 # Sanity checks:
-  $self->{JOB_POLL_INTERVAL_FAST}>0.05 or die "JOB_POLL_INTERVAL_FAST too small:",$self->{JOB_POLL_INTERVAL_FAST},"\n";
+  $self->{JOB_POLL_INTERVAL_FAST}>0.01 or die "JOB_POLL_INTERVAL_FAST too small:",$self->{JOB_POLL_INTERVAL_FAST},"\n";
   ref($self->{Q_INTERFACE}) or die "No sensible Q_INTERFACE object defined.\n";
 
   foreach ( keys %params ) {
@@ -101,6 +104,10 @@ sub new {
     next if $_ eq 'FILE_POSTBACK';
     next if $_ eq 'LOGFILE';
     defined $self->{$_} or die "Fatal: $_ not defined after reading config file\n";
+  }
+
+  foreach ( qw / INBOX WORKDIR OUTBOX / ) {
+    -d $self->{$_} or die "$_ directory $self->{$_}: Non-existant or not a directory\n";
   }
 
 # Become a daemon, if that's what the user wants.
@@ -186,6 +193,10 @@ sub ReadConfig {
     $rate = int(10*$rate)/10;
     $self->Logmsg("Faking transfers rate: ",$rate,' ',$units) if $self->{VERBOSE};
   }
+
+  if ( $self->{JOBMANAGER} && $self->{JOB_PARALLELISM} ) {
+    $self->{JOBMANAGER}{NJOBS} = $self->{JOB_PARALLELISM};
+  }
 }
 
 sub _default {
@@ -210,21 +221,37 @@ sub _start {
   $kernel->delay_set('poll_job',$self->{JOB_POLL_INTERVAL_SLOW})
         if $self->{Q_INTERFACE}->can('ListJob');
 
-  $kernel->delay_set('report_queue',$self->{REPORT_QUEUE_INTERVAL});
+  $kernel->delay_set('report_queue',$self->{QUEUE_STATS_INTERVAL});
 
-  $kernel->yield('poll_inbox')
+  $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
+
+  $kernel->yield('poll_inbox');
+  $self->read_directory($self->{WORKDIR});
 }
 
 sub poll_inbox {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($h,$job,$json,$pattern,$file,@files);
 
   $self->Dbgmsg("Polling inbox") if $self->{DEBUG};
+  $self->read_directory($self->{INBOX});
 
-  $pattern = $self->{INBOX} . '/*';
+  $kernel->delay_set('poll_inbox',$self->{INBOX_POLL_INTERVAL});
+}
+
+sub read_directory {
+  my ($self,$pattern) = @_;
+  my ($location,$h,$job,$json,$file,@files);
+
+  $pattern = $self->{INBOX} unless $pattern;
+  if ( $pattern =~ m%$self->{INBOX}% ) {
+    $location = 'inbox';
+  } else {
+    $location = 'work directory';
+  }
+  $pattern = $pattern . '/*';
   @files = glob( $pattern );
 
-  $self->Logmsg("Found ",scalar @files," new items in inbox") if $self->{VERBOSE};
+  $self->Logmsg("Found ",scalar @files," new items in ",$location) if $self->{VERBOSE};
   foreach $file ( sort @files ) {
     $self->Dbgmsg("Reading ",$file) if $self->{DEBUG};
     open JSON, "<$file" or die "Error reading $file: $!\n";
@@ -246,12 +273,14 @@ sub poll_inbox {
 	  VERBOSE	  => 1,
 	  X509_USER_PROXY => $h->{userProxyPath},
 	);
-    my @Files;
-    foreach ( @{$h->{PFNs}} ) {
+    my (@Files,$i,$lenPFNs);
+    $lenPFNs = scalar @{$h->{PFNs}};
+    for ($i=0; $i<$lenPFNs; ++$i) {
       push @Files, ASO::File->new(
-	  DESTINATION	=> $_,
+	  DESTINATION	=> $h->{PFNs}[$i],
 	  SOURCE	=> 'dummy'
 	);
+      $self->{FN_MAP}{$h->{PFNs}[$i]} = $h->{LFNs}[$i];
     }
     $job->Files( @Files );
 
@@ -262,8 +291,6 @@ sub poll_inbox {
     ($tmp = $file) =~s%^.*/%%;
     rename $file, $self->{WORKDIR} . '/' . $tmp;
   }
-
-  $kernel->delay_set('poll_inbox',$self->{INBOX_POLL_INTERVAL});
 }
 
 sub _child {}
@@ -273,7 +300,7 @@ sub report_queue {
   my ($priority,$id,$job);
 
   $self->Logmsg("Job queue: ",$self->{QUEUE}->get_item_count()," items");
-  $kernel->delay_set('report_queue',$self->{REPORT_QUEUE_INTERVAL});
+  $kernel->delay_set('report_queue',$self->{QUEUE_STATS_INTERVAL});
 }
 
 sub poll_job {
@@ -424,8 +451,11 @@ sub poll_job_postback {
               $f->Log($f->Timestamp,"from $_ to ",$f->State);
               $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
               if ( $f->ExitStates->{$f->State} ) {
-# TW This is a terminal state-change for the file. Log it to the Reporter
-#                 Log the details...
+
+# This is a terminal state-change for the file. Log it to the Reporter
+		  $f->Reason($s->{REASON});
+		  $self->add_report($f);
+
                   $summary = join (' ',
                                    map { "$_=\"" . $s->{$_} ."\"" }
                                    qw / SOURCE DESTINATION DURATION RETRIES REASON /
@@ -486,6 +516,37 @@ sub poll_job_postback {
 
 PJDONE:
   $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_FAST});
+}
+
+sub add_report {
+  my ($self,$file) = @_;
+
+  $self->{REPORTER} = { LFNs => [], transferStatus => [], failure_reason => [], timestamp => [] }
+      unless defined($self->{REPORTER});
+
+  push @{$self->{REPORTER}{LFNs}}, delete $self->{FN_MAP}{$file->Destination};
+  push @{$self->{REPORTER}{transferStatus}}, $file->State;
+  push @{$self->{REPORTER}{failure_reason}}, $file->Reason;
+  push @{$self->{REPORTER}{timestamp}}, $file->Timestamp;
+}
+
+sub notify_reporter {
+  my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
+  my ($len,$output);
+
+  if ( defined($self->{REPORTER}) ) {
+    $len = 0;
+    $len = scalar(@{$self->{REPORTER}{LFNs}}) if $self->{REPORTER}{LFNs};
+    $self->Logmsg("Notify Reporter of ",$len," files") if $len;
+
+    $output = $self->{OUTBOX} . '/Reporter-' . time() . '.json';
+    open OUT, "> $output" or die "open $output: $!\n";
+    print OUT encode_json($self->{REPORTER});
+    close OUT;
+    delete $self->{REPORTER};
+  }
+
+  $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
 }
 
 sub report_job {

@@ -3,8 +3,9 @@
 use warnings;
 use strict;
 
-#die "Need to read work directory on startup\n" .
+#die "OK: Need to read work directory on startup\n" .
 #    "Need to create per-file-endstate dropbox files\n" .
+#    "Need to debug the Reporter dropbox files\n" ,
 #    "Need to report failures correctly\n";
 
 ##H ASO Monitor prototype, based on Utilities/fts-transfer.pl from PhEDEx
