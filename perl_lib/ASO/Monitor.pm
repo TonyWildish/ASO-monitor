@@ -11,6 +11,7 @@ use POSIX;
 use ASO::Job;
 use ASO::File;
 use ASO::GliteAsync;
+use PHEDEX::Monitoring::Process;
 
 use Data::Dumper;
 
@@ -53,8 +54,11 @@ sub new {
 
   $self = \%params;
   map { $self->{uc $_} = $h{$_} } keys %h;
-
   bless $self, $class;
+
+# Become a daemon, if that's what the user wants.
+  $self->daemon() if $self->{LOGFILE};
+
   $self->ReadConfig();
 
   $self->{JOBMANAGER} = ASO::JobManager->new(
@@ -84,13 +88,17 @@ sub new {
         poll_inbox		=> 'poll_inbox',
         _default		=> '_default',
         _start			=> '_start',
+        _child			=> '_child',
+
         poll_job		=> 'poll_job',
         poll_job_postback	=> 'poll_job_postback',
         report_job		=> 'report_job',
         forget_job		=> 'forget_job',
-        _child			=> '_child',
         report_queue		=> 'report_queue',
         notify_reporter		=> 'notify_reporter',
+
+        make_stats		=> 'make_stats',
+
       },
     ],
   );
@@ -110,8 +118,8 @@ sub new {
     -d $self->{$_} or die "$_ directory $self->{$_}: Non-existant or not a directory\n";
   }
 
-# Become a daemon, if that's what the user wants.
-  $self->daemon() if $self->{LOGFILE};
+# Finally, a little self-monitoring
+  $self->{pmon} = PHEDEX::Monitoring::Process->new();
 
   return $self;
 }
@@ -220,13 +228,22 @@ sub _start {
 
   $kernel->delay_set('poll_job',$self->{JOB_POLL_INTERVAL_SLOW})
         if $self->{Q_INTERFACE}->can('ListJob');
-
   $kernel->delay_set('report_queue',$self->{QUEUE_STATS_INTERVAL});
-
   $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
-
   $kernel->yield('poll_inbox');
   $self->read_directory($self->{WORKDIR});
+
+  $kernel->delay_set('make_stats',$self->{STATISTICS_INTERVAL}) if $self->{STATISTICS_INTERVAL};
+}
+
+sub make_stats
+{
+  my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
+
+  my $summary = 'AGENT_STATISTICS ' . $self->{pmon}->FormatStats($self->{pmon}->ReadProcessStats);
+  $self->Logmsg($summary);
+
+  $kernel->delay_set('make_stats',$self->{STATISTICS_INTERVAL});
 }
 
 sub poll_inbox {
@@ -479,7 +496,7 @@ sub poll_job_postback {
                       );
       if ( $job->Summary ne $summary )
       {
-          $self->Logmsg('JOBID=',$job->ID," $summary") if $self->{VERBOSE};
+          $self->Dbgmsg('JOBID=',$job->ID," $summary") if $self->{DEBUG};
           $job->Summary($summary);
       }
 
