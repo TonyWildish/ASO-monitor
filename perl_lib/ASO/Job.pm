@@ -53,8 +53,7 @@ our %exit_states =
 	  abandoned		=> 1,
 	);
 
-sub new
-{
+sub new {
   my $proto = shift;
   my $class = ref($proto) || $proto;
   my $self  = ref($proto) ? $class->SUPER::new(@_) : {};
@@ -68,8 +67,6 @@ sub new
       } keys %ro_params;
   map { $self->{$_} = $args{$_} } keys %args;
 
-  $self->{LOG} = [];
-  $self->{RAW_OUTPUT} = [];
   $self->{ME} = $self->{ID}; # in case it's already set...
   bless $self, $class;
   $self->Log(time,'created...');
@@ -123,7 +120,6 @@ sub RawOutput
     chomp;
     push @{$self->{RAW_OUTPUT}}, $_ . "\n";
   }
-#  $self->{RAW_OUTPUT} = [ @_ ] if @_;
 
   return @{$self->{RAW_OUTPUT}} if wantarray;
   return join('',@{$self->{RAW_OUTPUT}});
