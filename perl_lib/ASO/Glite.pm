@@ -111,7 +111,7 @@ sub ListJob
       return \%result;
   };
   @raw = <GLITE>;
-  $result{RAW_OUTPUT} = [@raw];
+  $result{RAW_OUTPUT} = \@raw;
   close GLITE or do
   {
       print $self->Hdr,"close: $cmd: $!\n@raw";
@@ -167,8 +167,7 @@ sub ListJob
   foreach $h ( @h )
   {
 #  Be paranoid about the fields I read!
-    foreach ( qw / DESTINATION DURATION REASON RETRIES SOURCE STATE / )
-    {
+    foreach ( qw / DESTINATION DURATION REASON RETRIES SOURCE STATE / ) {
       die "No \"$_\" key! : ", map { "$_=$h->{$_} " } sort keys %{$h}
         unless defined($h->{$_});
     }
