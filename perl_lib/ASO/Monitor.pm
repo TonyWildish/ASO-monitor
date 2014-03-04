@@ -42,7 +42,7 @@ sub new {
           POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
-          JOB_POSTBACK           => undef,    # Callback for job state changes
+#          JOB_POSTBACK           => undef,    # Callback for job state changes
           FILE_POSTBACK          => undef,    # Callback for file state changes
           SANITY_INTERVAL        => 60,       # Interval for internal sanity-checks
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
@@ -50,6 +50,8 @@ sub new {
           LAST_SUCCESSFULL_POLL  => time,     # When I last got a job status
           QUEUE_STATS_INTERVAL   => 60,       # How often do I report the job-queue length
           REPORTER_INTERVAL	 => 15,       # How often to notify the Reporter of progress
+
+	  FORGET_JOB		 => 60,       # Timer for internal cleanup
         );
 
   $self = \%params;
@@ -57,20 +59,19 @@ sub new {
   bless $self, $class;
 
 # Become a daemon, if that's what the user wants.
-  $self->daemon() if $self->{LOGFILE};
 
   $self->ReadConfig();
-
-  $self->{JOBMANAGER} = ASO::JobManager->new(
-		  KEEPALIVE => 61,
-		  NJOBS     => $self->{JOB_PARALLELISM}
-		);
-
   if ( $self->{LOGFILE} && ! $self->{PIDFILE} ) {
     $self->{PIDFILE} = $self->{LOGFILE};
     $self->{PIDFILE} =~ s%.log$%%;
     $self->{PIDFILE} .= '.pid';
   }
+  $self->daemon() if $self->{LOGFILE};
+
+  $self->{JOBMANAGER} = ASO::JobManager->new(
+		  KEEPALIVE => 61,
+		  NJOBS     => $self->{JOB_PARALLELISM}
+		);
 
   $self->{QUEUE} = POE::Queue::Array->new();
   $self->{Q_INTERFACE} = ASO::GliteAsync->new
@@ -108,7 +109,7 @@ sub new {
   ref($self->{Q_INTERFACE}) or die "No sensible Q_INTERFACE object defined.\n";
 
   foreach ( keys %params ) {
-    next if $_ eq 'JOB_POSTBACK';
+#    next if $_ eq 'JOB_POSTBACK';
     next if $_ eq 'FILE_POSTBACK';
     next if $_ eq 'LOGFILE';
     defined $self->{$_} or die "Fatal: $_ not defined after reading config file\n";
@@ -161,6 +162,7 @@ sub daemon {
   # Indicate we've started
   print "$me: pid $$", ( $self->{DROPDIR} ? " started in $self->{DROPDIR}" : '' ), "\n";
 
+  print "writing logfile to $self->{LOGFILE}\n";
   # Close/redirect file descriptors
   $self->{LOGFILE} = "/dev/null" if ! defined $self->{LOGFILE};
   open (STDOUT, ">> $self->{LOGFILE}")
@@ -301,9 +303,7 @@ sub read_directory {
     }
     $job->Files( @Files );
 
-    $self->{JOBS}{$file} = $job;
     $self->QueueJob($job,$self->{BASE_PRIORITY});
-#   print Dumper($job);
     my $tmp;
     ($tmp = $file) =~s%^.*/%%;
     rename $file, $self->{WORKDIR} . '/' . $tmp;
@@ -397,6 +397,7 @@ sub poll_job_postback {
 
   # Job monitoring failed
   if ($error) {
+$DB::single=1;
       $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
   
 #     If I haven't been successful monitoring this job for a long time, give up on it
@@ -433,10 +434,7 @@ sub poll_job_postback {
 
   # Job monitoring was successful
   else {
-      
       $self->{LAST_SUCCESSFULL_POLL} = time;
-      $self->Logmsg("JOBID=",$job->ID," STATE=$result->{JOB_STATE}") if $self->{VERBOSE};
-      
       $job->State($result->{JOB_STATE});
       $job->RawOutput(@{$result->{RAW_OUTPUT}});
       
@@ -514,13 +512,11 @@ sub poll_job_postback {
   }
 
   $self->WorkStats('JOBS', $job->ID, $job->State);
-  $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
-  if ( $job->ExitStates->{$job->State} )
-  {
+# TW
+# $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
+  if ( $job->ExitStates->{$job->State} ) {
     $kernel->yield('report_job',$job);
-  }
-  else
-  {
+  } else {
 # Leave priority fixed for now.
 #   $result->{ETC} = 100 if $result->{ETC} < 1;
 #   $priority = $result->{ETC};
@@ -569,9 +565,9 @@ sub notify_reporter {
 sub report_job {
   my ( $self, $kernel, $job ) = @_[ OBJECT, KERNEL, ARG0 ];
   my $jobid = $job->ID;
-  $self->Logmsg("$jobid has ended in state ",$job->State) if $self->{VERBOSE};
+  $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
 
-  $job->Log(time,'Job has ended');
+  $job->Log(time,'Job ended');
   $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} )
   {
@@ -579,18 +575,19 @@ sub report_job {
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
   }
 
-  $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
-  if ( defined $job->JOB_POSTBACK ) { $job->JOB_POSTBACK->(); }
-  else
-  {
+# TW
+#  $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
+#  if ( defined $job->JOB_POSTBACK ) { $job->JOB_POSTBACK->(); }
+#  else
+#  {
     $self->Dbgmsg('Log for ',$job->ID,"\n",
                   $job->Log,
                   "\n",'Log ends for ',$job->ID,"\n") if $self->{DEBUG};
-  }
+#  }
 
 # Now I should take detailed action on any errors...
   $self->cleanup_job_stats($job);
-  $kernel->delay_set('forget_job',900,$job);
+  $kernel->delay_set('forget_job',$self->{FORGET_JOB},$job);
 
 # Remove the dropbox entry
   unlink $self->{WORKDIR} . '/' . $job->ID;
