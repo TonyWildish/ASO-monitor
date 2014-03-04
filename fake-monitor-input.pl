@@ -5,7 +5,7 @@ use Getopt::Long;
 use Data::Dumper;
 
 my ($in,$out,$json,$workflow,$payload);
-my ($proxies,$lfn,$i,$h,$nFiles,$base,$copyjob);
+my ($proxies,$lfn,$i,$h,$nFiles,$base,$copyjob,@users);
 $payload = {};
 GetOptions(
                 'in=s'  => \$in,
@@ -24,8 +24,9 @@ $workflow = $payload->{workflow};
 #   "PFNs":["pfn1","pfn2","pfn3"],
 #   "FTSJobid":'id-of-fts-job'}
 
-$i = scalar(@{$workflow->{proxies}});
-$h->{userProxyPath} = $workflow->{proxies}[rand($i)];
+$i = int(rand( scalar(keys %{$workflow->{proxies}}) ));
+$h->{userProxyPath} = (values(%{$workflow->{proxies}}))[$i];
+$h->{username}      = (keys  (%{$workflow->{proxies}}))[$i];
 
 $base = 16*16*16*16;
 $h->{FTSJobid} = sprintf("%08x-%04x-%04x-%04x-%04x%08x",
@@ -58,7 +59,7 @@ open COPYJOBSTAMP, ">$copyjob.start" or die "open $copyjob.start: $!\n";
 print COPYJOBSTAMP time;
 close COPYJOBSTAMP;
 
-open  JSON, ">$workflow->{dropbox}/$h->{FTSJobid}" or die "open output: $!\n";
+open  JSON, ">$workflow->{dropbox}/Monitor.$h->{FTSJobid}.json" or die "open output: $!\n";
 print JSON encode_json($h);
 close JSON;
 
