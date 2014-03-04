@@ -397,7 +397,6 @@ sub poll_job_postback {
 
   # Job monitoring failed
   if ($error) {
-$DB::single=1;
       $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
   
 #     If I haven't been successful monitoring this job for a long time, give up on it
