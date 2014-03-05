@@ -8,6 +8,7 @@ use POE;
 use POE::Queue::Array;
 use JSON::XS;
 use POSIX;
+use File::Path;
 use ASO::Job;
 use ASO::File;
 use ASO::GliteAsync;
@@ -310,6 +311,7 @@ sub read_directory {
 	  TIMESTAMP	  => time,
 	  VERBOSE	  => 1,
 	  X509_USER_PROXY => $h->{userProxyPath},
+	  USERNAME        => $h->{username},
 	);
     my (@Files,$i,$lenPFNs);
     $lenPFNs = scalar @{$h->{PFNs}};
@@ -361,7 +363,7 @@ sub poll_job {
 		        ENV => {
 		          PHEDEX_FAKEFTS_RATE => $self->{FAKE_TRANSFER_RATE},
 		          PHEDEX_FAKEFTS_MAP  => $self->{FAKE_TRANSFER_MAP},
-		          X509_USER_PROXY	  => $job->{X509_USER_PROXY},
+		          X509_USER_PROXY     => $job->{X509_USER_PROXY},
 		        },
 		      },
 		      $self->{Q_INTERFACE}->Command('ListJob',$job)
@@ -490,7 +492,7 @@ sub poll_job_postback {
 
 # This is a terminal state-change for the file. Log it to the Reporter
 		  $f->Reason($s->{REASON});
-		  $self->add_report($f);
+		  $self->add_report($job->{USERNAME},$f);
 
                   $summary = join (' ',
                                    map { "$_=\"" . $s->{$_} ."\"" }
@@ -551,31 +553,40 @@ PJDONE:
 }
 
 sub add_report {
-  my ($self,$file) = @_;
+  my ($self,$user,$file) = @_;
 
-  $self->{REPORTER} = { LFNs => [], transferStatus => [], failure_reason => [], timestamp => [] }
-      unless defined($self->{REPORTER});
+  $self->{REPORTER}{$user} = { LFNs => [], transferStatus => [], failure_reason => [], timestamp => [] }
+      unless defined($self->{REPORTER}{$user});
 
-  push @{$self->{REPORTER}{LFNs}}, delete $self->{FN_MAP}{$file->Destination};
-  push @{$self->{REPORTER}{transferStatus}}, $file->State;
-  push @{$self->{REPORTER}{failure_reason}}, $file->Reason;
-  push @{$self->{REPORTER}{timestamp}}, $file->Timestamp;
+  push @{$self->{REPORTER}{$user}{LFNs}}, delete $self->{FN_MAP}{$file->Destination};
+  push @{$self->{REPORTER}{$user}{transferStatus}}, $file->State;
+  push @{$self->{REPORTER}{$user}{failure_reason}}, $file->Reason;
+  push @{$self->{REPORTER}{$user}{timestamp}}, $file->Timestamp;
 }
 
 sub notify_reporter {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($len,$output);
+  my ($len,$output,$user,$userdir,$reporter);
 
-  if ( defined($self->{REPORTER}) ) {
-    $len = 0;
-    $len = scalar(@{$self->{REPORTER}{LFNs}}) if $self->{REPORTER}{LFNs};
-    $self->Logmsg("Notify Reporter of ",$len," files") if $len;
+  if ( defined($reporter = $self->{REPORTER}) ) {
+    foreach $user ( keys %{$reporter} ) {
+      $len = 0;
+      $len = scalar(@{$reporter->{$user}{LFNs}}) if $reporter->{$user}{LFNs};
+      $self->Logmsg("Notify Reporter of ",$len," files") if $len;
 
-    $output = $self->{OUTBOX} . '/Reporter-' . time() . '.json';
-    open OUT, "> $output" or die "open $output: $!\n";
-    print OUT encode_json($self->{REPORTER});
-    close OUT;
-    delete $self->{REPORTER};
+      $userdir = $output = $self->{OUTBOX} . '/' . $user;
+      if ( ! -d $userdir ) {
+        eval {
+          mkpath $userdir;
+        };
+        die "Cannot make directory $userdir: $@\n" if $@
+      }
+      $output = $userdir . '/Reporter-' . time() . '.json';
+      open OUT, "> $output" or die "open $output: $!\n";
+      print OUT encode_json($reporter->{$user});
+      close OUT;
+      delete $self->{REPORTER}{$user};
+    }
   }
 
   $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
