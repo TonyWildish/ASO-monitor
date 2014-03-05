@@ -555,12 +555,14 @@ PJDONE:
 sub add_report {
   my ($self,$user,$file) = @_;
 
+  my $reason = $file->Reason;
+  if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
   $self->{REPORTER}{$user} = { LFNs => [], transferStatus => [], failure_reason => [], timestamp => [] }
       unless defined($self->{REPORTER}{$user});
 
   push @{$self->{REPORTER}{$user}{LFNs}}, delete $self->{FN_MAP}{$file->Destination};
   push @{$self->{REPORTER}{$user}{transferStatus}}, $file->State;
-  push @{$self->{REPORTER}{$user}{failure_reason}}, $file->Reason;
+  push @{$self->{REPORTER}{$user}{failure_reason}}, $reason;
   push @{$self->{REPORTER}{$user}{timestamp}}, $file->Timestamp;
 }
 
