@@ -3,7 +3,7 @@ package ASO::GliteAsync;
 use warnings;
 use base 'ASO::Glite', 'PHEDEX::Core::Logging';
 use POE;
-#use POE::Component::Child;
+use Data::Dumper;
 
 our %params =
 	(
@@ -198,13 +198,13 @@ sub ParseListJob
       next;
     }
 
-    if ( m%^\s+Source:\s+(.*)\s*$% )
+    if ( m%^\s*Source:\s+(.*)\s*$% )
     {
 #     A 'Source' line is the first in a group for a single src->dst transfer
       push @h, $h if $h;
       undef $h;
     }
-    if ( m%^\s+(\S+):\s+(.*)\s*$% )
+    if ( m%^\s*(\S+):\s+(.*)\s*$% )
     {
       $last_key = uc $1;
       $h->{$last_key} = $2;

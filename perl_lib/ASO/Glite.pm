@@ -35,8 +35,7 @@ our %weights =
 	  Waiting =>  1 + 0 * 900,
 	);
 
-sub new
-{
+sub new {
   my $proto = shift;
   my $class = ref($proto) || $proto;
   my $self  = ref($proto) ? $class->SUPER::new(@_) : {};
@@ -51,8 +50,7 @@ sub new
   return $self;
 }
 
-sub AUTOLOAD
-{
+sub AUTOLOAD {
   my $self = shift;
   my $attr = our $AUTOLOAD;
   $attr =~ s/.*:://;
@@ -66,8 +64,7 @@ sub AUTOLOAD
   $self->$parent(@_);
 }
 
-sub ListQueue
-{
+sub ListQueue {
   my $self = shift;
   my ($cmd,$job,$state,%result,@raw);
 
@@ -94,8 +91,7 @@ sub ListQueue
   return \%result;
 }
 
-sub ListJob
-{
+sub ListJob {
   my ($self,$job) = @_;
   my ($cmd,$state,%result,$dst,@raw);
   my ($key,$value);
@@ -121,6 +117,7 @@ sub ListJob
 
   $preamble=1;
   my $last_key;
+
   while ( $_ = shift @raw )
   {
     if ( $preamble )

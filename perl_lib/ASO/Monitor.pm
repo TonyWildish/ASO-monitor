@@ -22,6 +22,7 @@ sub new {
   %h = @_;
   %params = (
           CONFIG		 => undef,
+	  CONFIG_POLL		 => 11,
           INBOX			 => undef,
           OUTBOX		 => undef,
           WORKDIR		 => undef,
@@ -99,6 +100,7 @@ sub new {
         notify_reporter		=> 'notify_reporter',
 
         make_stats		=> 'make_stats',
+        re_read_config		=> 're_read_config',
 
       },
     ],
@@ -173,6 +175,22 @@ sub daemon {
   $|=1; # Flush output line-by-line
 }
 
+sub re_read_config {
+  my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
+  if ( defined($self->{mtime}) ) {
+    my $mtime = (stat($self->{CONFIG}))[9];
+    if ( $mtime > $self->{mtime} ) {
+      $self->Logmsg("Config file has changed, re-reading...");
+      $self->ReadConfig();
+      $self->{mtime} = $mtime;
+    }
+  } else {
+    $self->{mtime} = (stat($self->{CONFIG}))[9] or 0;
+  }
+
+  $kernel->delay_set('re_read_config',$self->{CONFIG_POLL});
+}
+
 sub ReadConfig {
   my $self = shift;
 
@@ -236,6 +254,7 @@ sub _start {
   $self->read_directory($self->{WORKDIR});
 
   $kernel->delay_set('make_stats',$self->{STATISTICS_INTERVAL}) if $self->{STATISTICS_INTERVAL};
+  $kernel->delay_set('re_read_config',$self->{CONFIG_POLL});
 }
 
 sub make_stats
@@ -322,17 +341,21 @@ sub report_queue {
 
 sub poll_job {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($priority,$id,$job);
+  my ($priority,$id,$job,$logfile);
 
   while ( $self->{JOBMANAGER}->jobsQueued() < $self->{JOB_PARALLELISM} ) {
     ($priority,$id,$job) = $self->{QUEUE}->dequeue_next;
     if ( $id ) {
       $self->Dbgmsg('dequeue JOBID=',$job->ID) if $self->{DEBUG};
+      $logfile = '/dev/null';
+      if ( $self->{JOBLOGS} ) {
+        $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
+      }
       $self->{JOBMANAGER}->addJob(
 		      $self->{POLL_JOB_POSTBACK},
 		      {
 		        FTSJOB => $job,
-		        LOGFILE => '/dev/null', 
+		        LOGFILE => $logfile,
 		        KEEP_OUTPUT => 1,
 		        TIMEOUT => $self->{Q_TIMEOUT},
 		        ENV => {
@@ -398,7 +421,6 @@ sub poll_job_postback {
   # Job monitoring failed
   if ($error) {
       $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
-  
 #     If I haven't been successful monitoring this job for a long time, give up on it
       my $timeout = $job->Timeout;
       if ( $timeout && $job->Timestamp + $timeout < time  )
@@ -511,8 +533,6 @@ sub poll_job_postback {
   }
 
   $self->WorkStats('JOBS', $job->ID, $job->State);
-# TW
-# $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
   if ( $job->ExitStates->{$job->State} ) {
     $kernel->yield('report_job',$job);
   } else {
@@ -574,15 +594,9 @@ sub report_job {
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
   }
 
-# TW
-#  $self->{JOB_POSTBACK}->($job) if $self->{JOB_POSTBACK};
-#  if ( defined $job->JOB_POSTBACK ) { $job->JOB_POSTBACK->(); }
-#  else
-#  {
-    $self->Dbgmsg('Log for ',$job->ID,"\n",
-                  $job->Log,
-                  "\n",'Log ends for ',$job->ID,"\n") if $self->{DEBUG};
-#  }
+  $self->Dbgmsg('Log for ',$job->ID,"\n",
+                $job->Log,
+                "\n",'Log ends for ',$job->ID,"\n") if $self->{DEBUG};
 
 # Now I should take detailed action on any errors...
   $self->cleanup_job_stats($job);
