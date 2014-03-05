@@ -573,6 +573,7 @@ sub notify_reporter {
       $len = 0;
       $len = scalar(@{$reporter->{$user}{LFNs}}) if $reporter->{$user}{LFNs};
       $self->Logmsg("Notify Reporter of ",$len," files") if $len;
+      $reporter->{USERNAME} = $user;
 
       $userdir = $output = $self->{OUTBOX} . '/' . $user;
       if ( ! -d $userdir ) {
