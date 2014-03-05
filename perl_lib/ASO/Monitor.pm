@@ -51,7 +51,7 @@ sub new {
           JOBS			 => {},       # A hash of Job-IDs.
           LAST_SUCCESSFULL_POLL  => time,     # When I last got a job status
           QUEUE_STATS_INTERVAL   => 60,       # How often do I report the job-queue length
-          REPORTER_INTERVAL	 => 15,       # How often to notify the Reporter of progress
+          REPORTER_INTERVAL	 => 30,       # How often to notify the Reporter of progress
 
 	  FORGET_JOB		 => 60,       # Timer for internal cleanup
         );
@@ -572,8 +572,8 @@ sub notify_reporter {
     foreach $user ( keys %{$reporter} ) {
       $len = 0;
       $len = scalar(@{$reporter->{$user}{LFNs}}) if $reporter->{$user}{LFNs};
-      $self->Logmsg("Notify Reporter of ",$len," files") if $len;
-      $reporter->{USERNAME} = $user;
+      $self->Logmsg("Notify Reporter of ",$len," files for $user") if $len;
+      $reporter->{$user}{USERNAME} = $user;
 
       $userdir = $output = $self->{OUTBOX} . '/' . $user;
       if ( ! -d $userdir ) {
