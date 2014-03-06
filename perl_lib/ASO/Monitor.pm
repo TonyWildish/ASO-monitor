@@ -19,8 +19,8 @@ use Data::Dumper;
 sub new {
   my $proto = shift;
   my $class = ref($proto) || $proto;
-  my ($self,$help,%params,%h);
-  %h = @_;
+  my ($self,$help,%params,%args);
+  %args = @_;
   %params = (
           CONFIG		 => undef,
 	  CONFIG_POLL		 => 11,
@@ -44,7 +44,6 @@ sub new {
           POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
-#          JOB_POSTBACK           => undef,    # Callback for job state changes
           FILE_POSTBACK          => undef,    # Callback for file state changes
           SANITY_INTERVAL        => 60,       # Interval for internal sanity-checks
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
@@ -55,14 +54,16 @@ sub new {
 
 	  FORGET_JOB		 => 60,       # Timer for internal cleanup
         );
-
   $self = \%params;
-  map { $self->{uc $_} = $h{$_} } keys %h;
   bless $self, $class;
 
 # Become a daemon, if that's what the user wants.
 
+  if ( ! defined ($self->{CONFIG}=$args{CONFIG}) ) {
+    die "No --config file specified!\n";
+  }
   $self->ReadConfig();
+  map { $self->{uc $_} = $args{$_} if $args{$_} } keys %args;
   if ( $self->{LOGFILE} && ! $self->{PIDFILE} ) {
     $self->{PIDFILE} = $self->{LOGFILE};
     $self->{PIDFILE} =~ s%.log$%%;
@@ -555,27 +556,34 @@ PJDONE:
 sub add_report {
   my ($self,$user,$file) = @_;
 
+  return if defined $self->{REPORTER}{$user}{$file->Destination};
   my $reason = $file->Reason;
   if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
-  $self->{REPORTER}{$user} = { LFNs => [], transferStatus => [], failure_reason => [], timestamp => [] }
-      unless defined($self->{REPORTER}{$user});
-
-  push @{$self->{REPORTER}{$user}{LFNs}}, delete $self->{FN_MAP}{$file->Destination};
-  push @{$self->{REPORTER}{$user}{transferStatus}}, $file->State;
-  push @{$self->{REPORTER}{$user}{failure_reason}}, $reason;
-  push @{$self->{REPORTER}{$user}{timestamp}}, $file->Timestamp;
+  $self->{REPORTER}{$user}{$file->Destination} = {
+       LFN            => delete $self->{FN_MAP}{$file->Destination},
+       transferStatus => $file->State,
+       failure_reason => $reason,
+       timestamp      => $file->Timestamp,
+  };
 }
 
 sub notify_reporter {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($len,$output,$user,$userdir,$reporter);
+  my ($len,$output,$user,$userdir,$reporter,$h);
 
   if ( defined($reporter = $self->{REPORTER}) ) {
     foreach $user ( keys %{$reporter} ) {
+      undef $h;
       $len = 0;
-      $len = scalar(@{$reporter->{$user}{LFNs}}) if $reporter->{$user}{LFNs};
+      foreach ( values %{$reporter->{$user}} ) {
+        push @{$h->{LFNs}},           $_->{LFN};
+        push @{$h->{transferStatus}}, $_->{transferStatus};
+        push @{$h->{failure_reason}}, $_->{failure_reason};
+        push @{$h->{timestamp}},      $_->{timestamp};
+        $len++;
+      }
       $self->Logmsg("Notify Reporter of ",$len," files for $user") if $len;
-      $reporter->{$user}{USERNAME} = $user;
+      $h->{USERNAME} = $user;
 
       $userdir = $output = $self->{OUTBOX} . '/' . $user;
       if ( ! -d $userdir ) {
@@ -586,7 +594,7 @@ sub notify_reporter {
       }
       $output = $userdir . '/Reporter-' . time() . '.json';
       open OUT, "> $output" or die "open $output: $!\n";
-      print OUT encode_json($reporter->{$user});
+      print OUT encode_json($h);
       close OUT;
       delete $self->{REPORTER}{$user};
     }
@@ -598,14 +606,18 @@ sub notify_reporter {
 sub report_job {
   my ( $self, $kernel, $job ) = @_[ OBJECT, KERNEL, ARG0 ];
   my $jobid = $job->ID;
-  $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
 
+  $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
   $job->Log(time,'Job ended');
   $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} )
   {
     $self->WorkStats('FILES', $_->Destination, $_->State);
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
+
+#   Log the state-change in case it hasn't been logged already
+    $_->Reason("Job ended in state '" . $job->State . "'");
+    $self->add_report($job->{USERNAME},$_);
   }
 
   $self->Dbgmsg('Log for ',$job->ID,"\n",

@@ -75,33 +75,26 @@ use ASO::GliteAsync;
 use ASO::Monitor;
 
 my ($config,$service,$q_interval,$j_interval,$help,$verbose,$debug,$copyjob);
-my ($files_per_job,$flush_interval,$poll_interval,$poll_queue,$max_jobs);
-my ($file_trace_dir,$job_trace_dir,$monalisa);
-$service = 'https://prod-fts-ws.cern.ch:8443/glite-data-transfer-fts/services/FileTransfer';
-$q_interval     =  60;
-$j_interval     =   4;
-$files_per_job  =  16;
-$flush_interval = 600;
-$poll_interval  =  60;
-$max_jobs       =  10;
-
+my ($config_poll,$inbox,$outbox,$workdir,$logfile,$job_parallelism);
+my ($inbox_poll_interval,$reporter_interval,$nodaemon);
 $verbose = $debug = 0;
 
 GetOptions(	"service=s"		=> \$service,
 		"q_interval=i"		=> \$q_interval,
-		"j_interval=i"		=> \$j_interval,
-		"copyjob=s"		=> \$copyjob,
-		"files_per_job=i"	=> \$files_per_job,
-		"file_flush_interval=i"	=> \$flush_interval,
-		"file_poll_interval=i"	=> \$poll_interval,
-		"max_parallel_jobs=i"	=> \$max_jobs,
-		"job_trace_dir=s"	=> \$job_trace_dir,
-		"file_trace_dir=s"	=> \$file_trace_dir,
 		"config=s"		=> \$config,
+		"config_poll=i"		=> \$config_poll,
+		"job_parallelism=i"	=> \$job_parallelism,
+		"inbox_poll_interval=i"	=> \$inbox_poll_interval,
+		"reporter_interval=i"	=> \$reporter_interval,
+
+		"inbox=s"		=> \$inbox,
+		"outbox=s"		=> \$outbox,
+		"workdir=s"		=> \$workdir,
+		"logfile=s"		=> \$logfile,
+		"nodaemon"		=> \$nodaemon,
 		"help"			=> \&usage,
 		"verbose+"		=> \$verbose,
 		"debug+"		=> \$debug,
-		"monalisa=s"		=> \$monalisa,
 	  );
 
 defined($config) or die "Missing argument for --config\n";
@@ -110,10 +103,21 @@ defined($config) or die "Missing argument for --config\n";
 $help and die "No help yet, sorry...\n";
 
 my $ASO = ASO::Monitor->new(
-		  ME  		=> 'ASOMon',
-		  CONFIG	=> $config,
-		  VERBOSE	=> $verbose,
-		  DEBUG		=> $debug,
+		  ME  			=> 'ASOMon',
+		  SERVICE		=> $service,
+		  CONFIG		=> $config,
+		  CONFIG_POLL		=> $config_poll,
+		  Q_INTERVAL		=> $q_interval,
+		  JOB_PARALLELISM	=> $job_parallelism,
+		  INBOX_POLL_INTERVAL	=> $inbox_poll_interval,
+		  REPORTER_INTERVAL	=> $reporter_interval,
+		  INBOX			=> $inbox,
+		  OUTBOX		=> $outbox,
+		  WORKDIR		=> $workdir,
+		  LOGFILE		=> $logfile,
+		  NODAEMON		=> $nodaemon,
+		  VERBOSE		=> $verbose,
+		  DEBUG			=> $debug,
 		 );
 
 POE::Kernel->run();
