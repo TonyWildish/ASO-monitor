@@ -21,6 +21,7 @@ sub new {
   my $class = ref($proto) || $proto;
   my ($self,$help,%params,%args);
   %args = @_;
+  map { $args{uc $_} = delete $args{$_} } keys %args;
   %params = (
           CONFIG		 => undef,
 	  CONFIG_POLL		 => 11,
@@ -44,7 +45,7 @@ sub new {
           POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
-          FILE_POSTBACK          => undef,    # Callback for file state changes
+# TW           FILE_POSTBACK          => undef,    # Callback for file state changes
           SANITY_INTERVAL        => 60,       # Interval for internal sanity-checks
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
           JOBS			 => {},       # A hash of Job-IDs.
@@ -113,8 +114,8 @@ sub new {
   ref($self->{Q_INTERFACE}) or die "No sensible Q_INTERFACE object defined.\n";
 
   foreach ( keys %params ) {
-#    next if $_ eq 'JOB_POSTBACK';
-    next if $_ eq 'FILE_POSTBACK';
+# TW    next if $_ eq 'JOB_POSTBACK';
+# TW    next if $_ eq 'FILE_POSTBACK';
     next if $_ eq 'LOGFILE';
     defined $self->{$_} or die "Fatal: $_ not defined after reading config file\n";
   }
@@ -310,6 +311,7 @@ sub read_directory {
 	  STATE		  => 'undefined',
 	  SERVICE	  => $self->{SERVICE},
 	  TIMESTAMP	  => time,
+	  TIMEOUT	  => $self->{JOB_TIMEOUT},
 	  VERBOSE	  => 1,
 	  X509_USER_PROXY => $h->{userProxyPath},
 	  USERNAME        => $h->{username},
@@ -349,7 +351,7 @@ sub poll_job {
   while ( $self->{JOBMANAGER}->jobsQueued() < $self->{JOB_PARALLELISM} ) {
     ($priority,$id,$job) = $self->{QUEUE}->dequeue_next;
     if ( $id ) {
-      $self->Dbgmsg('dequeue JOBID=',$job->ID) if $self->{DEBUG};
+      $self->Logmsg('dequeue JOBID=',$job->ID) if $self->{VERBOSE};
       $logfile = '/dev/null';
       if ( $self->{JOBLOGS} ) {
         $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
@@ -382,6 +384,7 @@ sub poll_job_postback {
   my ( $self, $kernel, $arg0, $arg1 ) = @_[ OBJECT, KERNEL, ARG0, ARG1 ];
   my ($result,$priority,$id,$job,$summary,$command,$error);
 
+  $error = '';
   $command = $arg1->[0];
   if ($command->{STATUS} ne "0") { 
       $error = "ended with status $command->{STATUS}";
@@ -398,10 +401,9 @@ sub poll_job_postback {
     my $subtime = int(1000*$command->{DURATION})/1000;
     $self->Dbgmsg('ListJob took ',$subtime,' seconds');
   }
-# Arbitrary value, fixed, for now.
-  $priority = $self->{BASE_PRIORITY};
+
   if (exists $result->{ERROR}) {
-      $error = join("\n",@{$result->{ERROR}});
+      $error .= join("\n",@{$result->{ERROR}});
   }
 
   # Log the monitoring command once when the job enters the queue, or on every error
@@ -421,125 +423,119 @@ sub poll_job_postback {
     $job->VERBOSE(0);
   };
 
-  # Job monitoring failed
-  if ($error) {
+
+  if ($error) { # Job monitoring failed
       $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
-#     If I haven't been successful monitoring this job for a long time, give up on it
-      my $timeout = $job->Timeout;
-      if ( $timeout && $job->Timestamp + $timeout < time  )
+  } else { # Job monitoring was successful
+    $job->State($result->{JOB_STATE});
+    $job->RawOutput(@{$result->{RAW_OUTPUT}});
+
+    my $files = $job->Files;
+    foreach ( keys %{$result->{FILES}} ) {
+      my $s = $result->{FILES}{$_};
+      my $f = $files->{$s->{DESTINATION}};
+
+      if ( ! $f )
       {
-# TW Write a Reporter input file here with the failure report
-        $self->Alert('Abandoning JOBID=',$job->ID," after timeout ($timeout seconds)");
-        $job->State('abandoned');
-        # If 'abandoned' is a terminal state for the job, set the state of all unfinished files
-        # in the job to 'abandoned' as well. Else, let the job get back in the queue.
-        if ( $job->ExitStates->{$job->State} )
+        $f = ASO::File->new( %{$s} );
+        $job->Files($f);
+      }
+
+      if ( ! exists $f->ExitStates->{$s->{STATE}} )
+      { 
+        my $last = $self->{_new_file_states}{$s->{STATE}} || 0;
+        if ( time - $last > 300 )
         {
-            foreach ( keys %{$job->Files} ) {
-                my $f = $job->Files->{$_};
-                if ( $f->ExitStates->{$f->State} == 0 ) {
-                    my $oldstate = $f->State('abandoned');
-                    $f->Log($f->Timestamp,"from $oldstate to ",$f->State);
-                    $f->Reason('Could not monitor transfer job');
-                    # If 'abandoned' is a terminal state for the file, report it.
-                    # Otherwise, reset the job state to undefined to let it get back in the queue.
-                    if ( $f->ExitStates->{$f->State} ) {
-                        $job->FILE_POSTBACK->( $f, $oldstate, undef ) if $job->FILE_POSTBACK;
-                        $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
-                    }
-                    else {
-                        $job->State('undefined');
-                    }
-                } 
-            }
+          $self->{_new_file_states}{$s->{STATE}} = time;
+          $self->Alert("Unknown file-state: " . $s->{STATE});
         }
+      }
+          
+      $self->WorkStats('FILES', $f->Destination, $f->State);
+      $self->LinkStats($f->Destination, $f->FromNode, $f->ToNode, $f->State);
+
+      if ( $_ = $f->State( $s->{STATE} ) ) {
+        $f->Log($f->Timestamp,"from $_ to ",$f->State);
+        $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
+        if ( $f->ExitStates->{$f->State} ) {
+# This is a terminal state-change for the file. Log it to the Reporter
+          $f->Reason($s->{REASON});
+          $self->add_file_report($job->{USERNAME},$f);
+
+          $summary = join (' ',
+                           map { "$_=\"" . $s->{$_} ."\"" }
+                           qw / SOURCE DESTINATION DURATION RETRIES REASON /
+                          );
+          $job->Log( time, 'file transfer details',$summary,"\n" );
+          $f->Log  ( time, 'file transfer details',$summary,"\n" );
+
+          foreach ( qw / DURATION RETRIES REASON / ) { $f->$_($s->{$_}); }
+        }
+# TW        $job->FILE_POSTBACK->( $f, $_, $s ) if $job->FILE_POSTBACK;
+# TW        $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
+      }
     }
+
+    $summary = join(' ',
+                    "ETC=" . $result->{ETC},
+                    'JOB_STATE=' . $result->{JOB_STATE},
+                    'FILE_STATES:',
+                    map { $_.'='.$result->{FILE_STATES}{$_} }
+                    sort keys %{$result->{FILE_STATES}}
+                    );
+    if ( $job->Summary ne $summary )
+    {
+      $self->Dbgmsg('JOBID=',$job->ID," $summary") if $self->{DEBUG};
+      $job->Summary($summary);
+    }
+
+    if ( ! exists $job->ExitStates->{$result->{JOB_STATE}} )
+    { 
+      my $last = $self->{_new_job_states}{$result->{JOB_STATE}} || 0;
+      if ( time - $last > 300 )
+      {
+        $self->{_new_job_states}{$result->{JOB_STATE}} = time;
+        $self->Alert("Unknown job-state: " . $result->{JOB_STATE});
+      }
+    }
+
+    $job->State($result->{JOB_STATE});
   }
 
-  # Job monitoring was successful
-  else {
-      $self->{LAST_SUCCESSFULL_POLL} = time;
-      $job->State($result->{JOB_STATE});
-      $job->RawOutput(@{$result->{RAW_OUTPUT}});
-      
-      my $files = $job->Files;
-      foreach ( keys %{$result->{FILES}} ) {
-          my $s = $result->{FILES}{$_};
-          my $f = $files->{$s->{DESTINATION}};
+# If the job hasn't finished in time, give up on it
+  my $timeout = $job->Timeout;
+  if ( $timeout && $job->Timestamp + $timeout < time  ) {
+    $self->Alert('Abandoning JOBID=',$job->ID," after timeout ($timeout seconds)");
+    $job->State('abandoned');
 
-          if ( ! $f )
-          {
-              $f = ASO::File->new( %{$s} );
-              $job->Files($f);
-          }
+    foreach ( keys %{$job->Files} ) {
+      my $f = $job->Files->{$_};
+      if ( $f->ExitStates->{$f->State} == 0 ) {
+        my $oldstate = $f->State('abandoned');
+        $f->Log($f->Timestamp,"from $oldstate to ",$f->State);
+        $f->Reason("Job timed out after $timeout seconds");
+        $self->add_file_report($job->{USERNAME},$f);
 
-          if ( ! exists $f->ExitStates->{$s->{STATE}} )
-          { 
-              my $last = $self->{_new_file_states}{$s->{STATE}} || 0;
-              if ( time - $last > 300 )
-              {
-                  $self->{_new_file_states}{$s->{STATE}} = time;
-                  $self->Alert("Unknown file-state: " . $s->{STATE});
-              }
-          }
-          
-          $self->WorkStats('FILES', $f->Destination, $f->State);
-          $self->LinkStats($f->Destination, $f->FromNode, $f->ToNode, $f->State);
+#       If 'abandoned' is a terminal state for the file, report it.
+#       Otherwise, reset the job state to undefined to let it get back in the queue.
+#        if ( $f->ExitStates->{$f->State} ) {
+# TW          $job->FILE_POSTBACK->( $f, $oldstate, undef ) if $job->FILE_POSTBACK;
+# TW          $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
+#        } else {
+#          $job->State('undefined');
+#        }
 
-          if ( $_ = $f->State( $s->{STATE} ) ) {
-              $f->Log($f->Timestamp,"from $_ to ",$f->State);
-              $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
-              if ( $f->ExitStates->{$f->State} ) {
-
-# This is a terminal state-change for the file. Log it to the Reporter
-		  $f->Reason($s->{REASON});
-		  $self->add_report($job->{USERNAME},$f);
-
-                  $summary = join (' ',
-                                   map { "$_=\"" . $s->{$_} ."\"" }
-                                   qw / SOURCE DESTINATION DURATION RETRIES REASON /
-                                   );
-                  $job->Log( time, 'file transfer details',$summary,"\n" );
-                  $f->Log  ( time, 'file transfer details',$summary,"\n" );
-                  
-                  foreach ( qw / DURATION RETRIES REASON / ) { $f->$_($s->{$_}); }
-              }
-              $job->FILE_POSTBACK->( $f, $_, $s ) if $job->FILE_POSTBACK;
-              $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
-          }
-      }
-
-      $summary = join(' ',
-                      "ETC=" . $result->{ETC},
-                      'JOB_STATE=' . $result->{JOB_STATE},
-                      'FILE_STATES:',
-                      map { $_.'='.$result->{FILE_STATES}{$_} }
-                      sort keys %{$result->{FILE_STATES}}
-                      );
-      if ( $job->Summary ne $summary )
-      {
-          $self->Dbgmsg('JOBID=',$job->ID," $summary") if $self->{DEBUG};
-          $job->Summary($summary);
-      }
-
-      if ( ! exists $job->ExitStates->{$result->{JOB_STATE}} )
-      { 
-          my $last = $self->{_new_job_states}{$result->{JOB_STATE}} || 0;
-          if ( time - $last > 300 )
-          {
-              $self->{_new_job_states}{$result->{JOB_STATE}} = time;
-              $self->Alert("Unknown job-state: " . $result->{JOB_STATE});
-          }
-      }
-
-      $job->State($result->{JOB_STATE});
+      } 
+    }
   }
 
   $self->WorkStats('JOBS', $job->ID, $job->State);
   if ( $job->ExitStates->{$job->State} ) {
+#   If the job is done/dead/abandoned, report it, but don't re-queue it.
     $kernel->yield('report_job',$job);
   } else {
 # Leave priority fixed for now.
+    $priority = $self->{BASE_PRIORITY};
 #   $result->{ETC} = 100 if $result->{ETC} < 1;
 #   $priority = $result->{ETC};
 #   $priority = int($priority/60);
@@ -549,11 +545,10 @@ sub poll_job_postback {
     $self->{QUEUE}->enqueue( $priority, $job );
   }
 
-PJDONE:
   $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_FAST});
 }
 
-sub add_report {
+sub add_file_report {
   my ($self,$user,$file) = @_;
 
   return if defined $self->{REPORTER}{$user}{$file->Destination};
@@ -610,14 +605,13 @@ sub report_job {
   $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
   $job->Log(time,'Job ended');
   $self->WorkStats('JOBS', $job->ID, $job->State);
-  foreach ( values %{$job->Files} )
-  {
+  foreach ( values %{$job->Files} ) {
     $self->WorkStats('FILES', $_->Destination, $_->State);
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
 
 #   Log the state-change in case it hasn't been logged already
     $_->Reason("Job ended in state '" . $job->State . "'");
-    $self->add_report($job->{USERNAME},$_);
+    $self->add_file_report($job->{USERNAME},$_);
   }
 
   $self->Dbgmsg('Log for ',$job->ID,"\n",
