@@ -45,7 +45,6 @@ sub new {
           POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
-# TW           FILE_POSTBACK          => undef,    # Callback for file state changes
           SANITY_INTERVAL        => 60,       # Interval for internal sanity-checks
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
           JOBS			 => {},       # A hash of Job-IDs.
@@ -54,6 +53,8 @@ sub new {
           REPORTER_INTERVAL	 => 30,       # How often to notify the Reporter of progress
 
 	  FORGET_JOB		 => 60,       # Timer for internal cleanup
+	  FILE_TIMEOUT		 => undef,    # Timeout for file state-changes
+	  JOB_TIMEOUT		 => undef,    # Global job timeout
         );
   $self = \%params;
   bless $self, $class;
@@ -114,8 +115,8 @@ sub new {
   ref($self->{Q_INTERFACE}) or die "No sensible Q_INTERFACE object defined.\n";
 
   foreach ( keys %params ) {
-# TW    next if $_ eq 'JOB_POSTBACK';
-# TW    next if $_ eq 'FILE_POSTBACK';
+    next if $_ eq 'JOB_TIMEOUT';
+    next if $_ eq 'FILE_TIMEOUT';
     next if $_ eq 'LOGFILE';
     defined $self->{$_} or die "Fatal: $_ not defined after reading config file\n";
   }
@@ -312,6 +313,7 @@ sub read_directory {
 	  SERVICE	  => $self->{SERVICE},
 	  TIMESTAMP	  => time,
 	  TIMEOUT	  => $self->{JOB_TIMEOUT},
+	  FILE_TIMEOUT    => $self->{FILE_TIMEOUT},
 	  VERBOSE	  => 1,
 	  X509_USER_PROXY => $h->{userProxyPath},
 	  USERNAME        => $h->{username},
@@ -457,6 +459,7 @@ sub poll_job_postback {
       if ( $_ = $f->State( $s->{STATE} ) ) {
         $f->Log($f->Timestamp,"from $_ to ",$f->State);
         $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
+        $job->{FILE_TIMESTAMP} = $f->Timestamp;
         if ( $f->ExitStates->{$f->State} ) {
 # This is a terminal state-change for the file. Log it to the Reporter
           $f->Reason($s->{REASON});
@@ -471,8 +474,6 @@ sub poll_job_postback {
 
           foreach ( qw / DURATION RETRIES REASON / ) { $f->$_($s->{$_}); }
         }
-# TW        $job->FILE_POSTBACK->( $f, $_, $s ) if $job->FILE_POSTBACK;
-# TW        $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
       }
     }
 
@@ -503,9 +504,24 @@ sub poll_job_postback {
   }
 
 # If the job hasn't finished in time, give up on it
-  my $timeout = $job->Timeout;
-  if ( $timeout && $job->Timestamp + $timeout < time  ) {
-    $self->Alert('Abandoning JOBID=',$job->ID," after timeout ($timeout seconds)");
+  my ($job_timeout,$file_timeout,$abandon,$reason);
+  $job_timeout  = $job->Timeout;
+  $file_timeout = $job->FileTimeout;
+  $abandon = 0;
+
+  if ( $job_timeout && $job->Timestamp + $job_timeout < time  ) {
+    $self->Alert('Abandoning JOBID=',$job->ID," after timeout ($job_timeout seconds)");
+    $abandon = 1;
+    $reason = "Job timed out after $job_timeout seconds";
+  }
+
+  if ( $file_timeout && $job->FileTimestamp + $file_timeout < time  ) {
+    $self->Alert('Abandoning JOBID=',$job->ID," after file state-change timeout ($file_timeout seconds)");
+    $abandon = 1;
+    $reason = "Job abandoned after no file state-change in $file_timeout seconds";
+  }
+
+  if ( $abandon ) {
     $job->State('abandoned');
 
     foreach ( keys %{$job->Files} ) {
@@ -513,18 +529,8 @@ sub poll_job_postback {
       if ( $f->ExitStates->{$f->State} == 0 ) {
         my $oldstate = $f->State('abandoned');
         $f->Log($f->Timestamp,"from $oldstate to ",$f->State);
-        $f->Reason("Job timed out after $timeout seconds");
+        $f->Reason($reason);
         $self->add_file_report($job->{USERNAME},$f);
-
-#       If 'abandoned' is a terminal state for the file, report it.
-#       Otherwise, reset the job state to undefined to let it get back in the queue.
-#        if ( $f->ExitStates->{$f->State} ) {
-# TW          $job->FILE_POSTBACK->( $f, $oldstate, undef ) if $job->FILE_POSTBACK;
-# TW          $self->{FILE_POSTBACK}->( $f, $job ) if $self->{FILE_POSTBACK};
-#        } else {
-#          $job->State('undefined');
-#        }
-
       } 
     }
   }
@@ -550,10 +556,11 @@ sub poll_job_postback {
 
 sub add_file_report {
   my ($self,$user,$file) = @_;
+  return unless defined $self->{FN_MAP}{$file->Destination};
 
-  return if defined $self->{REPORTER}{$user}{$file->Destination};
   my $reason = $file->Reason;
   if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
+
   $self->{REPORTER}{$user}{$file->Destination} = {
        LFN            => delete $self->{FN_MAP}{$file->Destination},
        transferStatus => $file->State,
@@ -564,21 +571,31 @@ sub add_file_report {
 
 sub notify_reporter {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($len,$output,$user,$userdir,$reporter,$h);
+  my ($len,$totlen,$output,$user,$userdir,$reporter,$h,$f,$k,$dst);
 
+  $totlen = 0;
   if ( defined($reporter = $self->{REPORTER}) ) {
     foreach $user ( keys %{$reporter} ) {
       undef $h;
       $len = 0;
-      foreach ( values %{$reporter->{$user}} ) {
-        push @{$h->{LFNs}},           $_->{LFN};
-        push @{$h->{transferStatus}}, $_->{transferStatus};
-        push @{$h->{failure_reason}}, $_->{failure_reason};
-        push @{$h->{timestamp}},      $_->{timestamp};
+      foreach $dst ( keys %{$reporter->{$user}} ) {
+        $f = $reporter->{$user}{$dst};
+        foreach $k ( qw / LFN transferStatus failure_reason timestamp / ) {
+          if ( !defined($f->{$k}) ) {
+            $self->Alert("File error: $k undefined for ",$dst);
+          }
+          push @{$h->{$k}}, $f->{$k};
+        }
+#       push @{$h->{LFNs}},           $_->{LFN};
+#       push @{$h->{transferStatus}}, $_->{transferStatus};
+#       push @{$h->{failure_reason}}, $_->{failure_reason};
+#       push @{$h->{timestamp}},      $_->{timestamp};
         $len++;
       }
+      $totlen += $len;
+      $h->{LFNs} = delete $h->{LFN};
       $self->Logmsg("Notify Reporter of ",$len," files for $user") if $len;
-      $h->{USERNAME} = $user;
+      $h->{username} = $user;
 
       $userdir = $output = $self->{OUTBOX} . '/' . $user;
       if ( ! -d $userdir ) {
@@ -595,6 +612,7 @@ sub notify_reporter {
     }
   }
 
+  $self->Logmsg("Notify Reporter of ",$totlen," files for all users") if $totlen;
   $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
 }
 
