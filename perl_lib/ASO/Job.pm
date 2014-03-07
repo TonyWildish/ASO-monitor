@@ -12,6 +12,8 @@ our %params =
 	  PRIORITY	=>     3,	# Priority for total job transfer
 	  JOB_POSTBACK	=> undef,	# Callback per job state-change
 	  FILE_POSTBACK	=> undef,	# Callback per file state-change
+	  FILE_TIMEOUT 	=> undef,	# Timeout for no file state-change
+	  FILE_TIMESTAMP=> undef,       # Time of last file state-change
 	  FILES		=> undef,	# An ASO::File array
 	  SPACETOKEN	=> undef,	# A space-token for this job
 	  COPYJOB	=> undef,	# Name of copyjob file
@@ -19,7 +21,7 @@ our %params =
 	  LOG           => undef,	# Internal log
 	  RAW_OUTPUT	=> undef,       # Raw output of status command
 	  SUMMARY	=> '',		# Summary of job-status so far
-	  VERBOSE	=>     0,		# Verbosity for Transfer::Backend::Interface commands
+	  VERBOSE	=>     0,	# Verbosity for Transfer::Backend::Interface commands
 	);
 
 # These are not allowed to be set by the Autoloader...
@@ -220,6 +222,13 @@ sub Timeout
   return $self->{TIMEOUT};
 }
 
+sub FileTimeout
+{
+  my $self = shift;
+  $self->{FILE_TIMEOUT} = shift if @_;
+  return $self->{FILE_TIMEOUT};
+}
+
 sub Priority
 {
   my $self = shift;
@@ -253,6 +262,13 @@ sub Timestamp
   my $self = shift;
   $self->{TIMESTAMP} = shift if @_;
   return $self->{TIMESTAMP};
+}
+
+sub FileTimestamp
+{
+  my $self = shift;
+  $self->{FILE_TIMESTAMP} = shift if @_;
+  return $self->{FILE_TIMESTAMP};
 }
 
 sub Tempdir

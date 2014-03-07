@@ -112,16 +112,12 @@ sub State
 {
   my ($self,$state,$time) = @_;
   return $self->{STATE} unless $state;
-  return undef unless $self->{STATE};
- 
-  if ( $state ne $self->{STATE} )
-  {
-    my $oldstate = $self->{STATE};
-    $self->{STATE} = $state;
-    $self->{TIMESTAMP} = $time || time;
-    return $oldstate;
-  }
-  return undef;
+  return undef if ( $state eq $self->{STATE} );
+
+  my $oldstate = $self->{STATE};
+  $self->{STATE} = $state;
+  $self->{TIMESTAMP} = $time || time;
+  return $oldstate;
 }
 
 sub ExitStates { return \%ASO::File::exit_states; }

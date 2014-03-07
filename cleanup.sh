@@ -3,6 +3,8 @@
 # This is a convenience script for me to clean and re-create my dropbox
 # directories. Use it at your peril, it may not work for you!
 #
+
+kill `cat *.pid`
 config=monitor.conf
 
 inbox=`   cat $config | sed -e 's%#.*$%%' | grep inbox    | grep -v inbox_ | awk '{ print $NF }'`
