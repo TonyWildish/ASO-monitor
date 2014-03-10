@@ -512,13 +512,13 @@ sub poll_job_postback {
   if ( $job_timeout && $job->Timestamp + $job_timeout < time  ) {
     $self->Alert('Abandoning JOBID=',$job->ID," after timeout ($job_timeout seconds)");
     $abandon = 1;
-    $reason = "Job timed out after $job_timeout seconds";
+    $reason = "job-timeout";
   }
 
   if ( $file_timeout && $job->FileTimestamp + $file_timeout < time  ) {
     $self->Alert('Abandoning JOBID=',$job->ID," after file state-change timeout ($file_timeout seconds)");
     $abandon = 1;
-    $reason = "Job abandoned after no file state-change in $file_timeout seconds";
+    $reason = "file-timeout";
   }
 
   if ( $abandon ) {
@@ -628,7 +628,12 @@ sub report_job {
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
 
 #   Log the state-change in case it hasn't been logged already
-    $_->Reason("Job ended in state '" . $job->State . "'");
+    if ( ! $_->ExitStates($_->State) ) {
+      $_->Reason("job-ended " . $job->State);
+    }
+    if ( !defined($f->Timestamp) ) {
+      $f->Timestamp(time);
+    }
     $self->add_file_report($job->{USERNAME},$_);
   }
 
