@@ -628,11 +628,12 @@ sub report_job {
     $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
 
 #   Log the state-change in case it hasn't been logged already
-    if ( ! $_->ExitStates($_->State) ) {
+    if ( ! $_->ExitStates->{$_->State} ) {
       $_->Reason("job-ended " . $job->State);
+      $_->State('Failed');
     }
-    if ( !defined($f->Timestamp) ) {
-      $f->Timestamp(time);
+    if ( !defined($_->Timestamp) ) {
+      $_->Timestamp(time);
     }
     $self->add_file_report($job->{USERNAME},$_);
   }
