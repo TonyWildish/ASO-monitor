@@ -290,7 +290,7 @@ sub read_directory {
   } else {
     $location = 'work directory';
   }
-  $pattern = $pattern . '/*';
+  $pattern = $pattern . '/Monitor\.[0-9,a-f,-]*\.json';
   @files = glob( $pattern );
 
   $self->Logmsg("Found ",scalar @files," new items in ",$location) if $self->{VERBOSE};
