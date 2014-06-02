@@ -135,19 +135,27 @@ sub job_queued
     $wheelid = $self->{_child}->run(@{$job->{CMD}});
   };
   if ( !$wheelid || $@ ) {
-    $self->Log('Component::Child::Run: WheelID is not defined') unless $wheelid;
-    $self->Log('Component::Child::Run: $@') if $@;
-    $self->Log( Data::Dumper->Dump([$job]));
+    $self->Logmsg('Component::Child::Run: WheelID is not defined') unless $wheelid;
+    $self->Logmsg('Component::Child::Run: $@') if $@;
+    $self->Logmsg( Data::Dumper->Dump([$job]) );
     return;
   }
   $job->{PID} = $self->{_child}->wheel($wheelid)->PID;
-  
+  if ( $self->{DEBUG} ) {
+    $self->Logmsg('WheelID: ',$wheelid,', PID: ',$job->{PID});
+  }
+
   # Other variables we add to the job
   $job->{_start} = &mytimeofday();
   $job->{_cmdname} = $job->{CMD}[0];
   $job->{_cmdname} =~ s|.*/||;
 
   # Store the job in the package global and our running catalogue
+  if ( $PAYLOADS{$wheelid} ) { # Paranoia about wheelIDs!
+    $self->Alert("PAYLOAD already defined for WheelID=$wheelid");
+    $self->Alert( Data::Dumper->Dump([$PAYLOADS{$wheelid}]) );
+    $self->Alert( Data::Dumper->Dump([$job]) );
+  }
   $PAYLOADS{$wheelid} = $job;
   $self->{JOBS_RUNNING}{$wheelid} = $job->{PID};
 
@@ -185,7 +193,9 @@ sub job_queued
       my $oldfh = select($logfh); local $| = 1; select($oldfh);
       print $logfh
 	(strftime ("%Y-%m-%d %H:%M:%S", gmtime),
-         " $job->{_cmdname}($job->{PID}): Executing: @{$job->{CMD}}\n");
+         " $job->{_cmdname}($job->{PID}): Executing: @{$job->{CMD}}\n",
+	 strftime ("%Y-%m-%d %H:%M:%S", gmtime),
+         " WheelID=$wheelid, PID=$job->{PID}\n");
     } else {
       warn "Couldn't open log file $job->{LOGFILE}: $!";
       open($job->{_logfh}, '>&', \*STDOUT);
@@ -289,8 +299,6 @@ sub _child_done {
 
 sub _child_died {
   my ( $self, $args ) = @_[ 0 , 1 ];
-  my $wheelid = $args->{wheel};
-  my $payload = $PAYLOADS{$wheelid};
 
   # pipe this event into _child_done event handler
   _child_done( $self, $args );
@@ -298,8 +306,6 @@ sub _child_died {
 
 sub _child_error {
   my ( $self, $args ) = @_[ 0 , 1 ];
-  my $wheelid = $args->{wheel};
-  my $payload = $PAYLOADS{$wheelid};
 
   # pipe this internal error to stderr event handler
   chomp $args->{error}; 
