@@ -238,8 +238,8 @@ sub ToNode
 sub Workdir
 {
   my $self = shift;
-  $self->{SOURCE} = shift if @_;
-  return $self->{SOURCE};
+  $self->{WORKDIR} = shift if @_;
+  return $self->{WORKDIR};
 }
 
 sub Timestamp
