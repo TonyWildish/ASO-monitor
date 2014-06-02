@@ -36,6 +36,7 @@ sub new {
 
 	  JOBMANAGER		 => undef,
 	  JOB_PARALLELISM	 =>  4,       # Max number of monitoring jobs to run in parallel
+	  DEBUG_JOBS		 => undef,    # set true for debugging the job-manager
 
           Q_INTERFACE		 => undef,    # A transfer queue interface object
           Q_TIMEOUT		 => 60,       # Timeout for Q_INTERFACE commands
@@ -55,6 +56,7 @@ sub new {
 	  FORGET_JOB		 => 60,       # Timer for internal cleanup
 	  FILE_TIMEOUT		 => undef,    # Timeout for file state-changes
 	  JOB_TIMEOUT		 => undef,    # Global job timeout
+	  KEEP_INPUTS		 => 0,        # Set non-zero to keep the input JSON files
         );
   $self = \%params;
   bless $self, $class;
@@ -75,7 +77,8 @@ sub new {
 
   $self->{JOBMANAGER} = ASO::JobManager->new(
 		  KEEPALIVE => 61,
-		  NJOBS     => $self->{JOB_PARALLELISM}
+		  NJOBS     => $self->{JOB_PARALLELISM},
+		  DEBUG     => $self->{DEBUG_JOBS},
 		);
 
   $self->{QUEUE} = POE::Queue::Array->new();
@@ -428,6 +431,13 @@ sub poll_job_postback {
 
   if ($error) { # Job monitoring failed
       $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
+# TW How to detect jobs that are not found anymore???
+      foreach ( @{$job->{RAW_OUTPUT}} ) {
+        if ( m%^status: getTransferJobStatus: RequestID \S+ was not found$% ) {
+          $self->Alert("Job ",$job->ID." was not found. Abandoning it\n");
+          $job->Timeout(-1);
+        }
+      }
   } else { # Job monitoring was successful
     $job->State($result->{JOB_STATE});
     $job->RawOutput(@{$result->{RAW_OUTPUT}});
@@ -515,7 +525,7 @@ sub poll_job_postback {
     $reason = "job-timeout";
   }
 
-  if ( $file_timeout && $job->FileTimestamp + $file_timeout < time  ) {
+  if ( $file_timeout && $job->FileTimestamp && $job->FileTimestamp + $file_timeout < time  ) {
     $self->Alert('Abandoning JOBID=',$job->ID," after file state-change timeout ($file_timeout seconds)");
     $abandon = 1;
     $reason = "file-timeout";
@@ -556,13 +566,13 @@ sub poll_job_postback {
 
 sub add_file_report {
   my ($self,$user,$file) = @_;
-  return unless defined $self->{FN_MAP}{$file->Destination};
+  return unless defined $self->{FN_MAP}{$file->Source};
 
   my $reason = $file->Reason;
   if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
 
-  $self->{REPORTER}{$user}{$file->Destination} = {
-       LFN            => delete $self->{FN_MAP}{$file->Destination},
+  $self->{REPORTER}{$user}{$file->Source} = {
+       LFN            => delete $self->{FN_MAP}{$file->Source},
        transferStatus => $file->State,
        failure_reason => $reason,
        timestamp      => $file->Timestamp,
@@ -647,7 +657,7 @@ sub report_job {
   $kernel->delay_set('forget_job',$self->{FORGET_JOB},$job);
 
 # Remove the dropbox entry
-  unlink $self->{WORKDIR} . '/' . $job->ID;
+  unlink $self->{WORKDIR} . '/' . $job->ID unless $self->{KEEP_INPUTS};
 }
 
 sub forget_job
