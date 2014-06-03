@@ -193,8 +193,9 @@ sub job_queued
       my $oldfh = select($logfh); local $| = 1; select($oldfh);
       print $logfh
 	(strftime ("%Y-%m-%d %H:%M:%S", gmtime),
-         " $job->{_cmdname}($job->{PID}): Executing: @{$job->{CMD}}\n",
-	 strftime ("%Y-%m-%d %H:%M:%S", gmtime),
+         " $job->{_cmdname}($job->{PID}): Executing: @{$job->{CMD}}\n");
+      $self->{DEBUG} && print $logfh
+	(strftime ("%Y-%m-%d %H:%M:%S", gmtime),
          " WheelID=$wheelid, PID=$job->{PID}\n");
     } else {
       warn "Couldn't open log file $job->{LOGFILE}: $!";
