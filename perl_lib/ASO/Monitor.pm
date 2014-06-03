@@ -121,6 +121,7 @@ sub new {
     next if $_ eq 'JOB_TIMEOUT';
     next if $_ eq 'FILE_TIMEOUT';
     next if $_ eq 'LOGFILE';
+    next if $_ eq 'DEBUG_JOBS';
     defined $self->{$_} or die "Fatal: $_ not defined after reading config file\n";
   }
 
@@ -229,8 +230,12 @@ sub ReadConfig {
     $self->Logmsg("Faking transfers rate: ",$rate,' ',$units) if $self->{VERBOSE};
   }
 
-  if ( $self->{JOBMANAGER} && $self->{JOB_PARALLELISM} ) {
+  if ( $self->{FAKE_TRANSFER_SCRIPT} ) {
+    $self->{Q_INTERFACE}{WRAPPER} = $self->{FAKE_TRANSFER_SCRIPT};
+  }
+  if ( $self->{JOBMANAGER} ) {
     $self->{JOBMANAGER}{NJOBS} = $self->{JOB_PARALLELISM};
+    $self->{JOBMANAGER}{DEBUG} = $self->{DEBUG_JOBS};
   }
 }
 
@@ -325,8 +330,8 @@ sub read_directory {
     $lenPFNs = scalar @{$h->{PFNs}};
     for ($i=0; $i<$lenPFNs; ++$i) {
       push @Files, ASO::File->new(
-	  DESTINATION	=> $h->{PFNs}[$i],
-	  SOURCE	=> 'dummy'
+	  SOURCE	=> $h->{PFNs}[$i],
+	  DESTINATION	=> 'dummy'
 	);
       $self->{FN_MAP}{$h->{PFNs}[$i]} = $h->{LFNs}[$i];
     }
@@ -428,16 +433,16 @@ sub poll_job_postback {
     $job->VERBOSE(0);
   };
 
+# TW How to detect jobs that are not found anymore???
+  foreach ( @{$job->{RAW_OUTPUT}} ) {
+    if ( m%^status: getTransferJobStatus: RequestID \S+ was not found$% ) {
+      $self->Alert("Job ",$job->ID." was not found. Abandoning it\n");
+      $job->Timeout(-1);
+    }
+  }
 
   if ($error) { # Job monitoring failed
-      $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
-# TW How to detect jobs that are not found anymore???
-      foreach ( @{$job->{RAW_OUTPUT}} ) {
-        if ( m%^status: getTransferJobStatus: RequestID \S+ was not found$% ) {
-          $self->Alert("Job ",$job->ID." was not found. Abandoning it\n");
-          $job->Timeout(-1);
-        }
-      }
+    $self->Alert("ListJob for ",$job->ID," returned error: $error\n");
   } else { # Job monitoring was successful
     $job->State($result->{JOB_STATE});
     $job->RawOutput(@{$result->{RAW_OUTPUT}});
@@ -445,7 +450,7 @@ sub poll_job_postback {
     my $files = $job->Files;
     foreach ( keys %{$result->{FILES}} ) {
       my $s = $result->{FILES}{$_};
-      my $f = $files->{$s->{DESTINATION}};
+      my $f = $files->{$s->{SOURCE}};
 
       if ( ! $f )
       {
@@ -463,12 +468,12 @@ sub poll_job_postback {
         }
       }
           
-      $self->WorkStats('FILES', $f->Destination, $f->State);
-      $self->LinkStats($f->Destination, $f->FromNode, $f->ToNode, $f->State);
+      $self->WorkStats('FILES', $f->Source, $f->State);
+      $self->LinkStats($f->Source, $f->FromNode, $f->ToNode, $f->State);
 
       if ( $_ = $f->State( $s->{STATE} ) ) {
         $f->Log($f->Timestamp,"from $_ to ",$f->State);
-        $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
+        $job->Log($f->Timestamp,$f->Source,$f->Source,$f->State );
         $job->{FILE_TIMESTAMP} = $f->Timestamp;
         if ( $f->ExitStates->{$f->State} ) {
 # This is a terminal state-change for the file. Log it to the Reporter
@@ -634,8 +639,8 @@ sub report_job {
   $job->Log(time,'Job ended');
   $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} ) {
-    $self->WorkStats('FILES', $_->Destination, $_->State);
-    $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
+    $self->WorkStats('FILES', $_->Source, $_->State);
+    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
 
 #   Log the state-change in case it hasn't been logged already
     if ( ! $_->ExitStates->{$_->State} ) {
@@ -681,9 +686,9 @@ sub cleanup_job_stats
 sub cleanup_file_stats
 {
   my ( $self, $file ) = @_;
-  $self->Dbgmsg("Cleaning up stats for file destination=",$file->Destination) if $self->{DEBUG};
-  delete $self->{WORKSTATS}{FILES}{STATES}{$file->Destination};
-  delete $self->{LINKSTATS}{$file->Destination};
+  $self->Dbgmsg("Cleaning up stats for file source=",$file->Source) if $self->{DEBUG};
+  delete $self->{WORKSTATS}{FILES}{STATES}{$file->Source};
+  delete $self->{LINKSTATS}{$file->Source};
 }
 
 sub WorkStats
@@ -730,8 +735,8 @@ sub QueueJob
   $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} )
   {
-    $self->WorkStats('FILES', $_->Destination, $_->State);
-    $self->LinkStats($_->Destination, $_->FromNode, $_->ToNode, $_->State);
+    $self->WorkStats('FILES', $_->Source, $_->State);
+    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
   }
   $job->Priority($priority);
   $job->Timestamp(time);
