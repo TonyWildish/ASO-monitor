@@ -147,14 +147,8 @@ sub Files
 {
   my $self = shift;
   return $self->{FILES} unless @_;
-  foreach ( @_ )
-  {
-    if ( exists $self->{FILES}{ $_->DESTINATION } )
-    {
-#     I get here if a duplicate file is found!
-      print 'Duplicate file ',$_->DESTINATION," for this job\n";
-    }
-    $self->{FILES}{ $_->DESTINATION } = $_;
+  foreach ( @_ ) {
+    $self->{FILES}{ $_->SOURCE } = $_;
   }
 }
 
