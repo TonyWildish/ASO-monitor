@@ -45,8 +45,7 @@ sub new {
           JOB_POLL_INTERVAL_FAST =>  1,       # Job polling interval
           POLL_QUEUE		 =>  0,       # Poll the queue or not?
           ME                     => 'ASOMon', # Arbitrary name for this object
-          STATISTICS_INTERVAL    => 60,       # Interval for reporting statistics
-          SANITY_INTERVAL        => 60,       # Interval for internal sanity-checks
+          STATISTICS_INTERVAL    => 900,      # Interval for reporting statistics
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
           JOBS			 => {},       # A hash of Job-IDs.
           LAST_SUCCESSFULL_POLL  => time,     # When I last got a job status
@@ -433,7 +432,6 @@ sub poll_job_postback {
     $job->VERBOSE(0);
   };
 
-# TW How to detect jobs that are not found anymore???
   foreach ( @{$job->{RAW_OUTPUT}} ) {
     if ( m%^status: getTransferJobStatus: RequestID \S+ was not found$% ) {
       $self->Alert("Job ",$job->ID." was not found. Abandoning it\n");
