@@ -29,7 +29,6 @@ sub new {
           OUTBOX		 => undef,
           WORKDIR		 => undef,
           SERVICE		 => undef,
-          BASE_PRIORITY		 => 100,
           VERBOSE		 => 0,
           DEBUG			 => 0,
 	  LOGFILE		 => undef,
@@ -43,7 +42,7 @@ sub new {
           INBOX_POLL_INTERVAL	 => 10,       # Inbox polling interval
           JOB_POLL_INTERVAL_SLOW => 10,       # Job polling interval
           JOB_POLL_INTERVAL_FAST =>  1,       # Job polling interval
-          POLL_QUEUE		 =>  0,       # Poll the queue or not?
+          PER_JOB_POLL_INTERVAL  => 7,        # Maximum poll rate per job
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 900,      # Interval for reporting statistics
           QUEUE			 => undef,    # A POE::Queue of transfer jobs...
@@ -254,8 +253,7 @@ EOF
 sub _start {
   my ( $self, $kernel, $session ) = @_[ OBJECT, KERNEL, SESSION ];
 
-  my $poll_job_postback  = $session->postback( 'poll_job_postback'  );
-  $self->{POLL_JOB_POSTBACK} = $poll_job_postback;
+  $self->{POLL_JOB_POSTBACK} = $session->postback( 'poll_job_postback' );
 
   $kernel->delay_set('poll_job',$self->{JOB_POLL_INTERVAL_SLOW})
         if $self->{Q_INTERFACE}->can('ListJob');
@@ -289,8 +287,9 @@ sub poll_inbox {
 
 sub read_directory {
   my ($self,$pattern) = @_;
-  my ($location,$h,$job,$json,$file,@files);
+  my ($location,$h,$job,$json,$file,@files,$priority);
 
+  $priority = time() + $self->{PER_JOB_POLL_INTERVAL};
   $pattern = $self->{INBOX} unless $pattern;
   if ( $pattern =~ m%$self->{INBOX}% ) {
     $location = 'inbox';
@@ -336,9 +335,12 @@ sub read_directory {
     }
     $job->Files( @Files );
 
-    $self->QueueJob($job,$self->{BASE_PRIORITY});
+    $self->QueueJob($job,$priority);
+    $priority++;
     my $tmp;
     ($tmp = $file) =~s%^.*/%%;
+    $tmp =~ s%^Monitor\.%%;
+    $tmp =~ s%\.json$%%;
     rename $file, $self->{WORKDIR} . '/' . $tmp;
   }
 }
@@ -355,38 +357,61 @@ sub report_queue {
 
 sub poll_job {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
-  my ($priority,$id,$job,$logfile);
+  my ($priority,$id,$job,$logfile,$next_poll);
 
-  while ( $self->{JOBMANAGER}->jobsQueued() < $self->{JOB_PARALLELISM} ) {
-    ($priority,$id,$job) = $self->{QUEUE}->dequeue_next;
-    if ( $id ) {
-      $self->Logmsg('dequeue JOBID=',$job->ID) if $self->{VERBOSE};
-      $logfile = '/dev/null';
-      if ( $self->{JOBLOGS} ) {
-        $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
-      }
-      $self->{JOBMANAGER}->addJob(
-		      $self->{POLL_JOB_POSTBACK},
-		      {
-		        FTSJOB => $job,
-		        LOGFILE => $logfile,
-		        KEEP_OUTPUT => 1,
-		        TIMEOUT => $self->{Q_TIMEOUT},
-		        ENV => {
-		          PHEDEX_FAKEFTS_RATE => $self->{FAKE_TRANSFER_RATE},
-		          PHEDEX_FAKEFTS_MAP  => $self->{FAKE_TRANSFER_MAP},
-		          X509_USER_PROXY     => $job->{X509_USER_PROXY},
-		        },
-		      },
-		      $self->{Q_INTERFACE}->Command('ListJob',$job)
-		    );
-    } else {
-      $self->{LAST_SUCCESSFUL_POLL} = time;
-      $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_FAST});
+# First, if it's not time to poll the next job, wait until it is...
+  if ( $self->{QUEUE}->get_item_count() ) {
+    $next_poll = $self->{QUEUE}->get_next_priority() - time();
+    $self->Logmsg('Next poll in ',$next_poll,' seconds') if $self->{DEBUG};
+    if ( $next_poll > 0 ) {
+      $self->Logmsg('Wait ',$next_poll,' seconds before polling next job')if $self->{DEBUG};
+      $kernel->delay_set('poll_job', $next_poll);
       return;
     }
   }
-  $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_SLOW});
+
+# Second, while there are jobs to poll, and slots to poll them in, check
+# if they're due, and poll them!
+  while ( $self->{JOBMANAGER}->jobsQueued() < $self->{JOB_PARALLELISM} &&
+          $self->{QUEUE}->get_item_count() ) {
+    $next_poll = $self->{QUEUE}->get_next_priority() - time();
+    if ( $next_poll > 0 ) {
+      $self->Logmsg('Wait ',$next_poll,' seconds before polling next job');
+      $kernel->delay_set('poll_job', $next_poll);
+      return;
+    }
+    ($priority,$id,$job) = $self->{QUEUE}->dequeue_next();
+    $self->Logmsg('dequeue JOBID=',$job->ID) if $self->{VERBOSE};
+    $logfile = '/dev/null';
+    if ( $self->{JOBLOGS} ) {
+      $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
+    }
+    $self->{JOBMANAGER}->addJob(
+	    $self->{POLL_JOB_POSTBACK},
+	    {
+	      FTSJOB => $job,
+	      LOGFILE => $logfile,
+	      KEEP_OUTPUT => 1,
+	      TIMEOUT => $self->{Q_TIMEOUT},
+	      ENV => {
+	        PHEDEX_FAKEFTS_RATE => $self->{FAKE_TRANSFER_RATE},
+	        PHEDEX_FAKEFTS_MAP  => $self->{FAKE_TRANSFER_MAP},
+	        X509_USER_PROXY     => $job->{X509_USER_PROXY},
+	      },
+	    },
+	    $self->{Q_INTERFACE}->Command('ListJob',$job)
+	  );
+  }
+
+  if ( $self->{QUEUE}->get_item_count() ) {
+    $next_poll = $self->{QUEUE}->get_next_priority() - time();
+    $next_poll = $self->{JOB_POLL_INTERVAL_FAST} if $next_poll < $self->{JOB_POLL_INTERVAL_FAST};
+  } else {
+    $next_poll = $self->{JOB_POLL_INTERVAL_SLOW};
+  }
+
+  $self->Logmsg('Poll again in ',$next_poll,' seconds') if $self->{DEBUG};
+  $kernel->delay_set('poll_job', $next_poll);
 }
 
 sub poll_job_postback {
@@ -553,18 +578,12 @@ sub poll_job_postback {
 #   If the job is done/dead/abandoned, report it, but don't re-queue it.
     $kernel->yield('report_job',$job);
   } else {
-# Leave priority fixed for now.
-    $priority = $self->{BASE_PRIORITY};
-#   $result->{ETC} = 100 if $result->{ETC} < 1;
-#   $priority = $result->{ETC};
-#   $priority = int($priority/60);
-#   $priority = $self->{BASE_PRIORITY} if $priority < $self->{BASE_PRIORITY};
+    $priority = time() + $self->{PER_JOB_POLL_INTERVAL};
     $job->Priority($priority);
-    $self->Dbgmsg('requeue JOBID=',$job->ID," Priority=",$priority) if $self->{DEBUG};
+
+    $self->Dbgmsg('requeue JOBID=',$job->ID," Priority=",$priority) if $self->{VERBOSE};
     $self->{QUEUE}->enqueue( $priority, $job );
   }
-
-  $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_FAST});
 }
 
 sub add_file_report {
@@ -738,7 +757,8 @@ sub QueueJob
   }
   $job->Priority($priority);
   $job->Timestamp(time);
-  $self->Dbgmsg('enqueue JOBID=',$job->ID," Priority=",$priority) if $self->{DEBUG};
+
+  $self->Dbgmsg('enqueue JOBID=',$job->ID," Priority=",$priority) if $self->{VERBOSE};
   $self->{QUEUE}->enqueue( $priority, $job );
   $self->{JOBS}{$job->ID} = $job;
 }
