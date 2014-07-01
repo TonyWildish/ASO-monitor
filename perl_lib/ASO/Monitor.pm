@@ -51,8 +51,6 @@ sub new {
           QUEUE_STATS_INTERVAL   => 60,       # How often do I report the job-queue length
           REPORTER_INTERVAL	 => 30,       # How often to notify the Reporter of progress
 
-# TW
-#	  FORGET_JOB		 => 60,       # Timer for internal cleanup
 	  FILE_TIMEOUT		 => undef,    # Timeout for file state-changes
 	  JOB_TIMEOUT		 => undef,    # Global job timeout
 	  KEEP_INPUTS		 => 0,        # Set non-zero to keep the input JSON files
@@ -101,8 +99,6 @@ sub new {
         poll_job		=> 'poll_job',
         poll_job_postback	=> 'poll_job_postback',
         report_job		=> 'report_job',
-# TW
-#        forget_job		=> 'forget_job',
         report_queue		=> 'report_queue',
         notify_reporter		=> 'notify_reporter',
 
@@ -340,8 +336,9 @@ sub read_directory {
     $self->QueueJob($job,$priority);
     my $tmp;
     ($tmp = $file) =~s%^.*/%%;
-    $tmp =~ s%^Monitor\.%%;
-    $tmp =~ s%\.json$%%;
+# TW
+#    $tmp =~ s%^Monitor\.%%;
+#    $tmp =~ s%\.json$%%;
     rename $file, $self->{WORKDIR} . '/' . $tmp;
   }
 }
@@ -495,10 +492,6 @@ sub poll_job_postback {
         }
       }
           
-# TW
-#      $self->WorkStats('FILES', $f->Source, $f->State);
-#      $self->LinkStats($f->Source, $f->FromNode, $f->ToNode, $f->State);
-
       if ( $_ = $f->State( $s->{STATE} ) ) {
         $f->Log($f->Timestamp,"from $_ to ",$f->State);
         $job->Log($f->Timestamp,$f->Source,$f->Source,$f->State );
@@ -578,8 +571,6 @@ sub poll_job_postback {
     }
   }
 
-# TW
-#  $self->WorkStats('JOBS', $job->ID, $job->State);
   if ( $job->ExitStates->{$job->State} ) {
 #   If the job is done/dead/abandoned, report it, but don't re-queue it.
     $kernel->yield('report_job',$job);
@@ -659,13 +650,7 @@ sub report_job {
 
   $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
   $job->Log(time,'Job ended');
-# TW
-#  $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} ) {
-# TW
-#    $self->WorkStats('FILES', $_->Source, $_->State);
-#    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
-
 #   Log the state-change in case it hasn't been logged already
     if ( ! $_->ExitStates->{$_->State} ) {
       $_->Reason("job-ended " . $job->State);
@@ -682,72 +667,13 @@ sub report_job {
                 "\n",'Log ends for ',$job->ID,"\n") if $self->{DEBUG};
 
 # Now I should take detailed action on any errors...
-# TW
-#  $self->cleanup_job_stats($job);
   delete $self->{JOBS}{$job->ID} if $job->{ID};
-# TW
-#  $kernel->delay_set('forget_job',$self->{FORGET_JOB},$job);
 
 # Remove the dropbox entry
-  unlink $self->{WORKDIR} . '/' . $job->ID unless $self->{KEEP_INPUTS};
+# TW
+#  unlink $self->{WORKDIR} . '/' . $job->ID unless $self->{KEEP_INPUTS};
+  unlink $self->{WORKDIR} . '/Monitor.' . $job->ID . '.json' unless $self->{KEEP_INPUTS};
 }
-
-# TW
-#sub forget_job
-#{
-#  my ( $self, $kernel, $job ) = @_[ OBJECT, KERNEL, ARG0 ];
-#  delete $self->{JOBS}{$job->ID} if $job->{ID};
-#}
-
-# TW
-#sub cleanup_job_stats
-#{
-#  my ( $self, $job ) = @_;
-#  my $jobid = $job->ID || 'unknown-job';
-#  $self->Dbgmsg("Cleaning up stats for JOBID=$jobid...") if $self->{DEBUG};
-#  delete $self->{WORKSTATS}{JOBS}{STATES}{$jobid};
-#  foreach ( values %{$job->Files} )
-#  {
-#    $self->cleanup_file_stats($_);
-#  }
-#}
-#
-# TW
-#sub cleanup_file_stats
-#{
-#  my ( $self, $file ) = @_;
-#  $self->Dbgmsg("Cleaning up stats for file source=",$file->Source) if $self->{DEBUG};
-#  delete $self->{WORKSTATS}{FILES}{STATES}{$file->Source};
-#  delete $self->{LINKSTATS}{$file->Source};
-#}
-#
-# TW
-#sub WorkStats
-#{
-#  my ($self,$class,$key,$val) = @_;
-#  if ( defined($class) && !defined($key))
-#  {
-#      return $self->{WORKSTATS}{$class}{STATES};
-#  }
-#  elsif ( defined($class) && defined($key) )
-#  {
-#    $self->Dbgmsg("WorkStats: class=$class key=$key value=$val") if $self->{DEBUG};
-#    $self->{WORKSTATS}{$class}{STATES}{$key} = $val;
-#    return $self->{WORKSTATS}{$class};
-#  }
-#  return $self->{WORKSTATS};
-#}
-#
-# TW
-#sub LinkStats
-#{
-#    my ($self,$file,$from,$to,$state) = @_;
-#    return $self->{LINKSTATS} unless defined $file &&
-#                                     defined $from &&
-#                                     defined $to;
-#    $self->{LINKSTATS}{$file}{$from}{$to} = $state;
-#    return $self->{LINKSTATS}{$file}{$from}{$to};
-#}
 
 sub isKnown
 {
@@ -765,14 +691,7 @@ sub QueueJob
   $self->Logmsg('Queueing JOBID=',$job->ID,' at priority ',$priority);
 
 # TW
-#  $self->WorkStats('JOBS', $job->ID, $job->State);
-# TW
-#  foreach ( values %{$job->Files} )
-#  {
-#    $self->WorkStats('FILES', $_->Source, $_->State);
-#    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
-#  }
-  $job->Priority($priority);
+#  $job->Priority($priority);
   $job->Timestamp(time);
 
   $self->Dbgmsg('enqueue JOBID=',$job->ID," Priority=",$priority) if $self->{VERBOSE};
