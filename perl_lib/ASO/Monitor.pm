@@ -336,9 +336,6 @@ sub read_directory {
     $self->QueueJob($job,$priority);
     my $tmp;
     ($tmp = $file) =~s%^.*/%%;
-# TW
-#    $tmp =~ s%^Monitor\.%%;
-#    $tmp =~ s%\.json$%%;
     rename $file, $self->{WORKDIR} . '/' . $tmp;
   }
 }
@@ -575,6 +572,13 @@ sub poll_job_postback {
 #   If the job is done/dead/abandoned, report it, but don't re-queue it.
     $kernel->yield('report_job',$job);
   } else {
+#   Could get smart here: Check the rate at which files are completing in
+#   this job, adjust the offset (PER_JOB_POLL_INTERVAL) accordingly.
+#   In practice, this is not likely to be worth it. The fixed load on FTS is
+#   small enough not to need this type of improvement, and the only real
+#   difference to the Monitor is that there can be increased latency when
+#   a large number of jobs are being monitored (because faster transefers
+#   have to compete for job-slots with transfers that take forever)
     $priority = time() + $self->{PER_JOB_POLL_INTERVAL};
 
     $self->Dbgmsg('requeue JOBID=',$job->ID," Priority=",$priority) if $self->{DEBUG};
@@ -670,8 +674,6 @@ sub report_job {
   delete $self->{JOBS}{$job->ID} if $job->{ID};
 
 # Remove the dropbox entry
-# TW
-#  unlink $self->{WORKDIR} . '/' . $job->ID unless $self->{KEEP_INPUTS};
   unlink $self->{WORKDIR} . '/Monitor.' . $job->ID . '.json' unless $self->{KEEP_INPUTS};
 }
 
@@ -690,8 +692,6 @@ sub QueueJob
   $priority = 1 unless $priority;
   $self->Logmsg('Queueing JOBID=',$job->ID,' at priority ',$priority);
 
-# TW
-#  $job->Priority($priority);
   $job->Timestamp(time);
 
   $self->Dbgmsg('enqueue JOBID=',$job->ID," Priority=",$priority) if $self->{VERBOSE};
