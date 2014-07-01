@@ -41,7 +41,7 @@ sub new {
           Q_TIMEOUT		 => 60,       # Timeout for Q_INTERFACE commands
           INBOX_POLL_INTERVAL	 => 10,       # Inbox polling interval
           JOB_POLL_INTERVAL_SLOW => 10,       # Job polling interval
-          JOB_POLL_INTERVAL_FAST =>  1,       # Job polling interval
+          JOB_POLL_INTERVAL_FAST =>  2,       # Job polling interval
           PER_JOB_POLL_INTERVAL  => 7,        # Maximum poll rate per job
           ME                     => 'ASOMon', # Arbitrary name for this object
           STATISTICS_INTERVAL    => 900,      # Interval for reporting statistics
@@ -51,7 +51,8 @@ sub new {
           QUEUE_STATS_INTERVAL   => 60,       # How often do I report the job-queue length
           REPORTER_INTERVAL	 => 30,       # How often to notify the Reporter of progress
 
-	  FORGET_JOB		 => 60,       # Timer for internal cleanup
+# TW
+#	  FORGET_JOB		 => 60,       # Timer for internal cleanup
 	  FILE_TIMEOUT		 => undef,    # Timeout for file state-changes
 	  JOB_TIMEOUT		 => undef,    # Global job timeout
 	  KEEP_INPUTS		 => 0,        # Set non-zero to keep the input JSON files
@@ -100,7 +101,8 @@ sub new {
         poll_job		=> 'poll_job',
         poll_job_postback	=> 'poll_job_postback',
         report_job		=> 'report_job',
-        forget_job		=> 'forget_job',
+# TW
+#        forget_job		=> 'forget_job',
         report_queue		=> 'report_queue',
         notify_reporter		=> 'notify_reporter',
 
@@ -289,7 +291,6 @@ sub read_directory {
   my ($self,$pattern) = @_;
   my ($location,$h,$job,$json,$file,@files,$priority);
 
-  $priority = time() + $self->{PER_JOB_POLL_INTERVAL};
   $pattern = $self->{INBOX} unless $pattern;
   if ( $pattern =~ m%$self->{INBOX}% ) {
     $location = 'inbox';
@@ -335,8 +336,8 @@ sub read_directory {
     }
     $job->Files( @Files );
 
+    $priority = time() + rand($self->{PER_JOB_POLL_INTERVAL}+2);
     $self->QueueJob($job,$priority);
-    $priority++;
     my $tmp;
     ($tmp = $file) =~s%^.*/%%;
     $tmp =~ s%^Monitor\.%%;
@@ -359,50 +360,53 @@ sub poll_job {
   my ( $self, $kernel ) = @_[ OBJECT, KERNEL ];
   my ($priority,$id,$job,$logfile,$next_poll);
 
-# First, if it's not time to poll the next job, wait until it is...
-  if ( $self->{QUEUE}->get_item_count() ) {
-    $next_poll = $self->{QUEUE}->get_next_priority() - time();
-    $self->Logmsg('Next poll in ',$next_poll,' seconds') if $self->{DEBUG};
-    if ( $next_poll > 0 ) {
-      $self->Logmsg('Wait ',$next_poll,' seconds before polling next job')if $self->{DEBUG};
-      $kernel->delay_set('poll_job', $next_poll);
-      return;
-    }
+# First, if there's nothing to poll, come back later
+  if ( !$self->{QUEUE}->get_item_count() ) {
+    $self->Logmsg('No jobs to poll...') if $self->{DEBUG};
+    $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_SLOW});
+    return;
   }
 
-# Second, while there are jobs to poll, and slots to poll them in, check
-# if they're due, and poll them!
-  while ( $self->{JOBMANAGER}->jobsQueued() < $self->{JOB_PARALLELISM} &&
-          $self->{QUEUE}->get_item_count() ) {
-    $next_poll = $self->{QUEUE}->get_next_priority() - time();
-    if ( $next_poll > 0 ) {
-      $self->Logmsg('Wait ',$next_poll,' seconds before polling next job');
-      $kernel->delay_set('poll_job', $next_poll);
-      return;
-    }
-    ($priority,$id,$job) = $self->{QUEUE}->dequeue_next();
-    $self->Logmsg('dequeue JOBID=',$job->ID) if $self->{VERBOSE};
-    $logfile = '/dev/null';
-    if ( $self->{JOBLOGS} ) {
-      $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
-    }
-    $self->{JOBMANAGER}->addJob(
-	    $self->{POLL_JOB_POSTBACK},
-	    {
-	      FTSJOB => $job,
-	      LOGFILE => $logfile,
-	      KEEP_OUTPUT => 1,
-	      TIMEOUT => $self->{Q_TIMEOUT},
-	      ENV => {
-	        PHEDEX_FAKEFTS_RATE => $self->{FAKE_TRANSFER_RATE},
-	        PHEDEX_FAKEFTS_MAP  => $self->{FAKE_TRANSFER_MAP},
-	        X509_USER_PROXY     => $job->{X509_USER_PROXY},
-	      },
-	    },
-	    $self->{Q_INTERFACE}->Command('ListJob',$job)
-	  );
+# Second, if it's not time to poll the next job, wait until it is...
+  $next_poll = $self->{QUEUE}->get_next_priority() - time();
+  $self->Logmsg('Next poll in ',$next_poll,' seconds') if $self->{DEBUG};
+  if ( $next_poll > 0 ) {
+    $self->Logmsg('Wait ',$next_poll,' seconds before polling next job')if $self->{DEBUG};
+    $kernel->delay_set('poll_job', $next_poll);
+    return;
   }
 
+# Third, if there are no job-slots available, go away for a short while
+  if ( $self->{JOBMANAGER}->jobsQueued() >= $self->{JOB_PARALLELISM} ) {
+    $self->Logmsg('No slots available but still work to submit...') if $self->{DEBUG} > 1;
+    $kernel->delay_set('poll_job', $self->{JOB_POLL_INTERVAL_FAST});
+    return;
+  }
+
+# Finally, I have at least one job-slot, and at least one job to submit!
+  ($priority,$id,$job) = $self->{QUEUE}->dequeue_next();
+  $self->Logmsg('dequeue JOBID=',$job->ID) if $self->{VERBOSE};
+  $logfile = '/dev/null';
+  if ( $self->{JOBLOGS} ) {
+    $logfile = $self->{JOBLOGS} . '/' . $job->ID . '.' . time() . '.log';
+  }
+  $self->{JOBMANAGER}->addJob(
+    $self->{POLL_JOB_POSTBACK},
+    {
+      FTSJOB => $job,
+      LOGFILE => $logfile,
+      KEEP_OUTPUT => 1,
+      TIMEOUT => $self->{Q_TIMEOUT},
+      ENV => {
+        PHEDEX_FAKEFTS_RATE => $self->{FAKE_TRANSFER_RATE},
+        PHEDEX_FAKEFTS_MAP  => $self->{FAKE_TRANSFER_MAP},
+        X509_USER_PROXY     => $job->{X509_USER_PROXY},
+      },
+    },
+    $self->{Q_INTERFACE}->Command('ListJob',$job)
+  );
+
+# Having submitted a new polling job, when do I come back for more?
   if ( $self->{QUEUE}->get_item_count() ) {
     $next_poll = $self->{QUEUE}->get_next_priority() - time();
     $next_poll = $self->{JOB_POLL_INTERVAL_FAST} if $next_poll < $self->{JOB_POLL_INTERVAL_FAST};
@@ -491,8 +495,9 @@ sub poll_job_postback {
         }
       }
           
-      $self->WorkStats('FILES', $f->Source, $f->State);
-      $self->LinkStats($f->Source, $f->FromNode, $f->ToNode, $f->State);
+# TW
+#      $self->WorkStats('FILES', $f->Source, $f->State);
+#      $self->LinkStats($f->Source, $f->FromNode, $f->ToNode, $f->State);
 
       if ( $_ = $f->State( $s->{STATE} ) ) {
         $f->Log($f->Timestamp,"from $_ to ",$f->State);
@@ -573,15 +578,15 @@ sub poll_job_postback {
     }
   }
 
-  $self->WorkStats('JOBS', $job->ID, $job->State);
+# TW
+#  $self->WorkStats('JOBS', $job->ID, $job->State);
   if ( $job->ExitStates->{$job->State} ) {
 #   If the job is done/dead/abandoned, report it, but don't re-queue it.
     $kernel->yield('report_job',$job);
   } else {
     $priority = time() + $self->{PER_JOB_POLL_INTERVAL};
-    $job->Priority($priority);
 
-    $self->Dbgmsg('requeue JOBID=',$job->ID," Priority=",$priority) if $self->{VERBOSE};
+    $self->Dbgmsg('requeue JOBID=',$job->ID," Priority=",$priority) if $self->{DEBUG};
     $self->{QUEUE}->enqueue( $priority, $job );
   }
 }
@@ -654,10 +659,12 @@ sub report_job {
 
   $self->Logmsg("JOBID=$jobid ended in state ",$job->State);
   $job->Log(time,'Job ended');
-  $self->WorkStats('JOBS', $job->ID, $job->State);
+# TW
+#  $self->WorkStats('JOBS', $job->ID, $job->State);
   foreach ( values %{$job->Files} ) {
-    $self->WorkStats('FILES', $_->Source, $_->State);
-    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
+# TW
+#    $self->WorkStats('FILES', $_->Source, $_->State);
+#    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
 
 #   Log the state-change in case it hasn't been logged already
     if ( ! $_->ExitStates->{$_->State} ) {
@@ -675,64 +682,72 @@ sub report_job {
                 "\n",'Log ends for ',$job->ID,"\n") if $self->{DEBUG};
 
 # Now I should take detailed action on any errors...
-  $self->cleanup_job_stats($job);
-  $kernel->delay_set('forget_job',$self->{FORGET_JOB},$job);
+# TW
+#  $self->cleanup_job_stats($job);
+  delete $self->{JOBS}{$job->ID} if $job->{ID};
+# TW
+#  $kernel->delay_set('forget_job',$self->{FORGET_JOB},$job);
 
 # Remove the dropbox entry
   unlink $self->{WORKDIR} . '/' . $job->ID unless $self->{KEEP_INPUTS};
 }
 
-sub forget_job
-{
-  my ( $self, $kernel, $job ) = @_[ OBJECT, KERNEL, ARG0 ];
-  delete $self->{JOBS}{$job->ID} if $job->{ID};
-}
+# TW
+#sub forget_job
+#{
+#  my ( $self, $kernel, $job ) = @_[ OBJECT, KERNEL, ARG0 ];
+#  delete $self->{JOBS}{$job->ID} if $job->{ID};
+#}
 
-sub cleanup_job_stats
-{
-  my ( $self, $job ) = @_;
-  my $jobid = $job->ID || 'unknown-job';
-  $self->Dbgmsg("Cleaning up stats for JOBID=$jobid...") if $self->{DEBUG};
-  delete $self->{WORKSTATS}{JOBS}{STATES}{$jobid};
-  foreach ( values %{$job->Files} )
-  {
-    $self->cleanup_file_stats($_);
-  }
-}
-
-sub cleanup_file_stats
-{
-  my ( $self, $file ) = @_;
-  $self->Dbgmsg("Cleaning up stats for file source=",$file->Source) if $self->{DEBUG};
-  delete $self->{WORKSTATS}{FILES}{STATES}{$file->Source};
-  delete $self->{LINKSTATS}{$file->Source};
-}
-
-sub WorkStats
-{
-  my ($self,$class,$key,$val) = @_;
-  if ( defined($class) && !defined($key))
-  {
-      return $self->{WORKSTATS}{$class}{STATES};
-  }
-  elsif ( defined($class) && defined($key) )
-  {
-    $self->Dbgmsg("WorkStats: class=$class key=$key value=$val") if $self->{DEBUG};
-    $self->{WORKSTATS}{$class}{STATES}{$key} = $val;
-    return $self->{WORKSTATS}{$class};
-  }
-  return $self->{WORKSTATS};
-}
-
-sub LinkStats
-{
-    my ($self,$file,$from,$to,$state) = @_;
-    return $self->{LINKSTATS} unless defined $file &&
-                                     defined $from &&
-                                     defined $to;
-    $self->{LINKSTATS}{$file}{$from}{$to} = $state;
-    return $self->{LINKSTATS}{$file}{$from}{$to};
-}
+# TW
+#sub cleanup_job_stats
+#{
+#  my ( $self, $job ) = @_;
+#  my $jobid = $job->ID || 'unknown-job';
+#  $self->Dbgmsg("Cleaning up stats for JOBID=$jobid...") if $self->{DEBUG};
+#  delete $self->{WORKSTATS}{JOBS}{STATES}{$jobid};
+#  foreach ( values %{$job->Files} )
+#  {
+#    $self->cleanup_file_stats($_);
+#  }
+#}
+#
+# TW
+#sub cleanup_file_stats
+#{
+#  my ( $self, $file ) = @_;
+#  $self->Dbgmsg("Cleaning up stats for file source=",$file->Source) if $self->{DEBUG};
+#  delete $self->{WORKSTATS}{FILES}{STATES}{$file->Source};
+#  delete $self->{LINKSTATS}{$file->Source};
+#}
+#
+# TW
+#sub WorkStats
+#{
+#  my ($self,$class,$key,$val) = @_;
+#  if ( defined($class) && !defined($key))
+#  {
+#      return $self->{WORKSTATS}{$class}{STATES};
+#  }
+#  elsif ( defined($class) && defined($key) )
+#  {
+#    $self->Dbgmsg("WorkStats: class=$class key=$key value=$val") if $self->{DEBUG};
+#    $self->{WORKSTATS}{$class}{STATES}{$key} = $val;
+#    return $self->{WORKSTATS}{$class};
+#  }
+#  return $self->{WORKSTATS};
+#}
+#
+# TW
+#sub LinkStats
+#{
+#    my ($self,$file,$from,$to,$state) = @_;
+#    return $self->{LINKSTATS} unless defined $file &&
+#                                     defined $from &&
+#                                     defined $to;
+#    $self->{LINKSTATS}{$file}{$from}{$to} = $state;
+#    return $self->{LINKSTATS}{$file}{$from}{$to};
+#}
 
 sub isKnown
 {
@@ -749,12 +764,14 @@ sub QueueJob
   $priority = 1 unless $priority;
   $self->Logmsg('Queueing JOBID=',$job->ID,' at priority ',$priority);
 
-  $self->WorkStats('JOBS', $job->ID, $job->State);
-  foreach ( values %{$job->Files} )
-  {
-    $self->WorkStats('FILES', $_->Source, $_->State);
-    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
-  }
+# TW
+#  $self->WorkStats('JOBS', $job->ID, $job->State);
+# TW
+#  foreach ( values %{$job->Files} )
+#  {
+#    $self->WorkStats('FILES', $_->Source, $_->State);
+#    $self->LinkStats($_->Source, $_->FromNode, $_->ToNode, $_->State);
+#  }
   $job->Priority($priority);
   $job->Timestamp(time);
 
