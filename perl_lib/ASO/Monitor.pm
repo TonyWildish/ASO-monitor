@@ -591,9 +591,7 @@ sub poll_job_postback {
 
 sub add_file_report {
   my ($self,$user,$file) = @_;
-  $self->Logmsg('add_file_report: ',$user,' ',$file->Source,' ',$file->Destination);
   return unless defined $self->{FN_MAP}{$file->Destination};
-  $self->Logmsg('add_file_report: ',$user,' ',$file->Source,' ',$file->Destination,' found...');
 
   my $reason = $file->Reason;
   if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
