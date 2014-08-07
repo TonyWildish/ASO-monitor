@@ -56,6 +56,8 @@ sub new {
 	  FILE_TIMEOUT		 => undef,    # Timeout for file state-changes
 	  JOB_TIMEOUT		 => undef,    # Global job timeout
 	  KEEP_INPUTS		 => 0,        # Set non-zero to keep the input JSON files
+
+	  UNLINK		 => [],       # Array of working JSON files to delete, after reporting...
         );
   $self = \%params;
   bless $self, $class;
@@ -647,6 +649,12 @@ sub notify_reporter {
     }
   }
 
+# Now clear the stack of working files that need to be deleted
+  foreach ( shift @{$self->{UNLINK}} ) {
+    $self->Logmsg('Unlink ',$_);
+    unlink $_;
+  }
+
   $self->Logmsg("Notify Reporter of ",$totlen," files for all users") if $totlen;
   $kernel->delay_set('notify_reporter',$self->{REPORTER_INTERVAL});
 }
@@ -676,8 +684,8 @@ sub report_job {
 # Now I should take detailed action on any errors...
   delete $self->{JOBS}{$job->ID} if $job->{ID};
 
-# Remove the dropbox entry
-  unlink $self->{WORKDIR} . '/Monitor.' . $job->ID . '.json' unless $self->{KEEP_INPUTS};
+# Stack the dropbox entry for unlinking.
+  push @{$self->{UNLINK}}, $self->{WORKDIR} . '/Monitor.' . $job->ID . '.json' unless $self->{KEEP_INPUTS};
 }
 
 sub isKnown
