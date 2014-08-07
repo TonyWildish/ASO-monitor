@@ -15,6 +15,8 @@ use ASO::GliteAsync;
 use PHEDEX::Monitoring::Process;
 
 use Data::Dumper;
+$Data::Dumper::Terse=1;
+$Data::Dumper::Indent=0;
 
 sub new {
   my $proto = shift;
@@ -325,8 +327,8 @@ sub read_directory {
     $lenPFNs = scalar @{$h->{PFNs}};
     for ($i=0; $i<$lenPFNs; ++$i) {
       push @Files, ASO::File->new(
-	  SOURCE	=> $h->{PFNs}[$i],
-	  DESTINATION	=> 'dummy'
+	  DESTINATION	=> $h->{PFNs}[$i],
+	  SOURCE	=> 'LFN: ' . $h->{LFNs}[$i],
 	);
       $self->{FN_MAP}{$h->{PFNs}[$i]} = $h->{LFNs}[$i];
     }
@@ -491,7 +493,7 @@ sub poll_job_postback {
           
       if ( $_ = $f->State( $s->{STATE} ) ) {
         $f->Log($f->Timestamp,"from $_ to ",$f->State);
-        $job->Log($f->Timestamp,$f->Source,$f->Source,$f->State );
+        $job->Log($f->Timestamp,$f->Source,$f->Destination,$f->State );
         $job->{FILE_TIMESTAMP} = $f->Timestamp;
         if ( $f->ExitStates->{$f->State} ) {
 # This is a terminal state-change for the file. Log it to the Reporter
@@ -561,7 +563,8 @@ sub poll_job_postback {
       my $f = $job->Files->{$_};
       if ( $f->ExitStates->{$f->State} == 0 ) {
         my $oldstate = $f->State('abandoned');
-        $f->Log($f->Timestamp,"from $oldstate to ",$f->State);
+        $f->Log($f->Timestamp," from $oldstate to ",$f->State);
+        $self->Logmsg($job->ID," ",$f->Destination," was $oldstate, now ",$f->State);
         $f->Reason($reason);
         $self->add_file_report($job->{USERNAME},$f);
       } 
@@ -588,13 +591,15 @@ sub poll_job_postback {
 
 sub add_file_report {
   my ($self,$user,$file) = @_;
-  return unless defined $self->{FN_MAP}{$file->Source};
+  $self->Logmsg('add_file_report: ',$user,' ',$file->Source,' ',$file->Destination);
+  return unless defined $self->{FN_MAP}{$file->Destination};
+  $self->Logmsg('add_file_report: ',$user,' ',$file->Source,' ',$file->Destination,' found...');
 
   my $reason = $file->Reason;
   if ( $reason eq 'error during  phase: [] ' ) { $reason = ''; }
 
   $self->{REPORTER}{$user}{$file->Source} = {
-       LFN            => delete $self->{FN_MAP}{$file->Source},
+       LFN            => delete $self->{FN_MAP}{$file->Destination},
        transferStatus => $file->State,
        failure_reason => $reason,
        timestamp      => $file->Timestamp,
